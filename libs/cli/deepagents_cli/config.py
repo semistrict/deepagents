@@ -12,7 +12,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from enum import StrEnum
-from importlib.metadata import PackageNotFoundError, distribution
+from importlib.metadata import PackageNotFoundError, distribution, version as pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse
@@ -866,6 +866,9 @@ class Settings:
     nvidia_api_key: str | None
     """NVIDIA API key if available."""
 
+    openrouter_api_key: str | None
+    """OpenRouter API key if available."""
+
     tavily_api_key: str | None
     """Tavily API key if available."""
 
@@ -926,6 +929,7 @@ class Settings:
         anthropic_key = resolve_env_var("ANTHROPIC_API_KEY")
         google_key = resolve_env_var("GOOGLE_API_KEY")
         nvidia_key = resolve_env_var("NVIDIA_API_KEY")
+        openrouter_key = resolve_env_var("OPENROUTER_API_KEY")
         tavily_key = resolve_env_var("TAVILY_API_KEY")
         google_cloud_project = resolve_env_var("GOOGLE_CLOUD_PROJECT")
 
@@ -970,6 +974,7 @@ class Settings:
             anthropic_api_key=anthropic_key,
             google_api_key=google_key,
             nvidia_api_key=nvidia_key,
+            openrouter_api_key=openrouter_key,
             tavily_api_key=tavily_key,
             google_cloud_project=google_cloud_project,
             deepagents_langchain_project=deepagents_langchain_project,
@@ -1011,6 +1016,7 @@ class Settings:
             "anthropic_api_key",
             "google_api_key",
             "nvidia_api_key",
+            "openrouter_api_key",
             "tavily_api_key",
         }
         """Fields that hold API keys — used to mask values in change reports
@@ -1021,6 +1027,7 @@ class Settings:
             "anthropic_api_key",
             "google_api_key",
             "nvidia_api_key",
+            "openrouter_api_key",
             "tavily_api_key",
             "google_cloud_project",
             "deepagents_langchain_project",
@@ -1069,6 +1076,7 @@ class Settings:
             "anthropic_api_key": resolve_env_var("ANTHROPIC_API_KEY"),
             "google_api_key": resolve_env_var("GOOGLE_API_KEY"),
             "nvidia_api_key": resolve_env_var("NVIDIA_API_KEY"),
+            "openrouter_api_key": resolve_env_var("OPENROUTER_API_KEY"),
             "tavily_api_key": resolve_env_var("TAVILY_API_KEY"),
             "google_cloud_project": resolve_env_var("GOOGLE_CLOUD_PROJECT"),
             "deepagents_langchain_project": resolve_env_var(LANGSMITH_PROJECT),
@@ -1130,6 +1138,11 @@ class Settings:
     def has_nvidia(self) -> bool:
         """Check if NVIDIA API key is configured."""
         return self.nvidia_api_key is not None
+
+    @property
+    def has_openrouter(self) -> bool:
+        """Check if OpenRouter API key is configured."""
+        return self.openrouter_api_key is not None
 
     @property
     def has_vertex_ai(self) -> bool:
@@ -1842,11 +1855,13 @@ def _get_default_model_spec() -> str:
         return "google_vertexai:gemini-3.1-pro-preview"
     if s.has_nvidia:
         return "nvidia:nvidia/nemotron-3-super-120b-a12b"
+    if s.has_openrouter:
+        return "openrouter:anthropic/claude-sonnet-4-6"
 
     msg = (
         "No credentials configured. Please set one of: "
         "ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, "
-        "GOOGLE_CLOUD_PROJECT, or NVIDIA_API_KEY"
+        "GOOGLE_CLOUD_PROJECT, NVIDIA_API_KEY, or OPENROUTER_API_KEY"
     )
     raise ModelConfigError(msg)
 
@@ -1894,6 +1909,39 @@ def _apply_openrouter_defaults(kwargs: dict[str, Any]) -> None:
     kwargs.setdefault("app_categories", _OPENROUTER_APP_CATEGORIES)
 
 
+_OPENROUTER_MIN_VERSION = "0.2.0"
+"""Minimum required version of ``langchain-openrouter``.
+
+Mirrors the constant in ``deepagents._models`` but avoids importing the SDK
+package (which triggers heavy top-level imports and can deadlock inside
+Textual workers).
+"""
+
+
+def _check_openrouter_version() -> None:
+    """Raise if the installed ``langchain-openrouter`` is below the minimum.
+
+    If the package is not installed at all the check is skipped;
+    ``init_chat_model`` will surface its own missing-dependency error downstream.
+
+    Raises:
+        ImportError: If the installed version is too old.
+    """
+    from packaging.version import Version
+
+    try:
+        installed = pkg_version("langchain-openrouter")
+    except PackageNotFoundError:
+        return
+    if Version(installed) < Version(_OPENROUTER_MIN_VERSION):
+        msg = (
+            f"deepagents requires langchain-openrouter>={_OPENROUTER_MIN_VERSION}, "
+            f"but {installed} is installed. "
+            f"Run: pip install 'langchain-openrouter>={_OPENROUTER_MIN_VERSION}'"
+        )
+        raise ImportError(msg)
+
+
 def _get_provider_kwargs(
     provider: str, *, model_name: str | None = None
 ) -> dict[str, Any]:
@@ -1936,9 +1984,7 @@ def _get_provider_kwargs(
             result["api_key"] = api_key
 
     if provider == "openrouter":
-        from deepagents._models import check_openrouter_version  # noqa: PLC2701
-
-        check_openrouter_version()
+        _check_openrouter_version()
         _apply_openrouter_defaults(result)
 
     return result
