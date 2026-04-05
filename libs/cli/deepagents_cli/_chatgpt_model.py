@@ -11,12 +11,15 @@ model can search the web alongside regular function tools.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import BaseMessage, SystemMessage
-from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from langchain_core.outputs import ChatGenerationChunk, ChatResult
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,9 @@ def _extract_system_to_instructions(
     parameter instead. This helper extracts all SystemMessages, concatenates
     their text, and returns the filtered list together with the combined
     instructions string (or ``None`` when there were no system messages).
+
+    Returns:
+        Tuple of (filtered messages, instructions text or None).
     """
     system_parts: list[str] = []
     filtered: list[BaseMessage] = []
@@ -79,10 +85,14 @@ def _extract_system_to_instructions(
 class ChatGPTOpenAI(ChatOpenAI):
     """ChatOpenAI variant for the ChatGPT backend API."""
 
-    def _prepare(
+    def _prepare(  # noqa: PLR6301  # Intentionally an instance method for subclass override
         self, messages: list[BaseMessage], kwargs: dict[str, Any]
     ) -> list[BaseMessage]:
-        """Common pre-processing for every call path."""
+        """Common pre-processing for every call path.
+
+        Returns:
+            Filtered message list (system messages extracted).
+        """
         _strip_reasoning(messages)
         _inject_web_search(kwargs)
         # The Responses API rejects system-role items in the input array.
@@ -143,7 +153,7 @@ class ChatGPTOpenAI(ChatOpenAI):
         messages: list[BaseMessage],
         stop: list[str] | None = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401  # Matching parent class signature
         messages = self._prepare(messages, kwargs)
         try:
             async for chunk in super()._astream(messages, stop=stop, **kwargs):

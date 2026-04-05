@@ -2013,7 +2013,8 @@ class TestForkThread:
         # Verify the new row exists.
         conn = sqlite3.connect(str(db))
         row = conn.execute(
-            "SELECT checkpoint_id, type, checkpoint FROM checkpoints WHERE thread_id = ?",
+            "SELECT checkpoint_id, type, checkpoint "
+            "FROM checkpoints WHERE thread_id = ?",
             (new_id,),
         ).fetchone()
         conn.close()
@@ -2161,7 +2162,7 @@ class TestFormatAutoresumeContext:
         assert "→" in ctx.toast
         assert "project" in ctx.toast
         # System message should mention old dir and new dir separately.
-        assert old.split("/")[-1] in ctx.system_message
+        assert old.rsplit("/", maxsplit=1)[-1] in ctx.system_message
         assert "current working directory" in ctx.system_message
 
     def test_same_dir(self, tmp_path: Path) -> None:

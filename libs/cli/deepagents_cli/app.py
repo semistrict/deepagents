@@ -16,7 +16,7 @@ from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple
 
 from textual.app import App, ScreenStackError
 from textual.binding import Binding, BindingType
@@ -103,14 +103,12 @@ def _get_error_logger() -> logging.Logger:
     _error_logger.addHandler(handler)
     return _error_logger
 
-class _AutoResumeContext:
+
+class _AutoResumeContext(NamedTuple):
     """Formatted strings for the auto-resume toast and system message."""
 
-    __slots__ = ("toast", "system_message")
-
-    def __init__(self, toast: str, system_message: str) -> None:
-        self.toast = toast
-        self.system_message = system_message
+    toast: str
+    system_message: str
 
 
 def _format_autoresume_context(
@@ -3478,32 +3476,28 @@ class DeepAgentsApp(App):
             # Include HTTP response body when available (LangGraph SDK /
             # httpx errors often carry it).
             response_body = ""
-            if hasattr(e, "response"):
-                try:
+            with suppress(Exception):  # Best-effort extraction
+                if hasattr(e, "response"):
                     response_body = e.response.text  # type: ignore[union-attr]
-                except Exception:
-                    pass
-            if hasattr(e, "body"):
-                try:
+            with suppress(Exception):  # Best-effort extraction
+                if hasattr(e, "body"):
                     response_body = json.dumps(e.body)  # type: ignore[union-attr]
-                except Exception:
-                    pass
             # Include the tail of the LangGraph server log when available —
             # the server sanitizes exceptions to "An internal error occurred"
             # so the real cause is only visible in its own log file.
             server_log_tail = ""
-            if self._server_proc and hasattr(self._server_proc, "_log_file"):
-                try:
+            with suppress(Exception):  # Best-effort log read
+                if self._server_proc and hasattr(self._server_proc, "_log_file"):
                     lf = self._server_proc._log_file
                     if lf is not None:
                         lf.flush()
-                        server_log_tail = Path(lf.name).read_text(
-                            errors="replace"
+                        server_log_tail = Path(lf.name).read_text(  # noqa: ASYNC240
+                            encoding="utf-8", errors="replace"
                         )[-4000:]
-                except Exception:
-                    pass
             _get_error_logger().error(
-                "Agent execution failed | thread=%s | error=%s | cause_chain=%s | response=%s | traceback:\n%s\n--- server log tail ---\n%s",
+                "Agent execution failed | thread=%s | error=%s "
+                "| cause_chain=%s | response=%s "
+                "| traceback:\n%s\n--- server log tail ---\n%s",
                 self._lc_thread_id,
                 repr(e),
                 cause_info,

@@ -916,7 +916,7 @@ async def find_nearest_thread(
         The best-matching ``ThreadInfo``, or ``None`` when no thread is
         found or *cwd* is not under *home*.
     """
-    cwd_path = Path(cwd).resolve()
+    cwd_path = Path(cwd).resolve()  # noqa: ASYNC240  # No I/O, just string normalization
     home_path = (Path(home) if home else Path.home()).resolve()
 
     # CWD must be equal to or under home.

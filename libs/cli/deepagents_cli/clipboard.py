@@ -55,7 +55,7 @@ def copy_selection_to_clipboard(app: App) -> None:
         try:
             if not hasattr(widget, "text_selection") or not widget.text_selection:
                 continue
-        except Exception:
+        except (AttributeError, TypeError, RuntimeError):
             continue
 
         selection = widget.text_selection
