@@ -1216,7 +1216,7 @@ class DeepAgentsApp(App):
                         old_display = format_path(nearest.get("cwd"))
                         new_display = format_path(self._cwd)
                         self.notify(
-                            f"Auto-resumed from {old_display}",
+                            f"Resuming session from {old_display}",
                             markup=False,
                         )
                         # Queue a system message so the agent knows
