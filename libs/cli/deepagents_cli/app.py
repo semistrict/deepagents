@@ -3398,12 +3398,27 @@ class DeepAgentsApp(App):
                     response_body = json.dumps(e.body)  # type: ignore[union-attr]
                 except Exception:
                     pass
+            # Include the tail of the LangGraph server log when available —
+            # the server sanitizes exceptions to "An internal error occurred"
+            # so the real cause is only visible in its own log file.
+            server_log_tail = ""
+            if self._server_proc and hasattr(self._server_proc, "_log_file"):
+                try:
+                    lf = self._server_proc._log_file
+                    if lf is not None:
+                        lf.flush()
+                        server_log_tail = Path(lf.name).read_text(
+                            errors="replace"
+                        )[-4000:]
+                except Exception:
+                    pass
             _get_error_logger().error(
-                "Agent execution failed | thread=%s | error=%s | response=%s | traceback:\n%s",
+                "Agent execution failed | thread=%s | error=%s | response=%s | traceback:\n%s\n--- server log tail ---\n%s",
                 self._lc_thread_id,
                 repr(e),
                 response_body,
                 err_detail,
+                server_log_tail,
             )
 
             # Ensure any in-flight tool calls don't remain stuck in "Running..."
