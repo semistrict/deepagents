@@ -16,7 +16,7 @@ from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple
 
 from textual.app import App, ScreenStackError
 from textual.binding import Binding, BindingType
@@ -65,6 +65,103 @@ from deepagents_cli.widgets.welcome import WelcomeBanner
 
 logger = logging.getLogger(__name__)
 _monotonic = time.monotonic
+
+_error_logger: logging.Logger | None = None
+
+
+def _get_error_logger() -> logging.Logger:
+    """Return a logger that always writes to ``~/.deepagents/error.log``.
+
+    Lazily creates the file handler on first call so normal startup pays
+    no cost.  The log uses JSON-lines format for easy machine parsing.
+    """
+    global _error_logger  # noqa: PLW0603
+    if _error_logger is not None:
+        return _error_logger
+
+    _error_logger = logging.getLogger("deepagents_cli._errors")
+    _error_logger.setLevel(logging.ERROR)
+    _error_logger.propagate = False
+
+    try:
+        log_dir = Path.home() / ".deepagents"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(str(log_dir / "error.log"), mode="a")
+    except OSError:
+        # Can't write the file — return the logger without a handler;
+        # calls will be silently dropped.
+        return _error_logger
+
+    handler.setLevel(logging.ERROR)
+    handler.setFormatter(
+        logging.Formatter(
+            '{"ts":"%(asctime)s","logger":"%(name)s","level":"%(levelname)s",'
+            '"message":"%(message)s"}',
+            datefmt="%Y-%m-%dT%H:%M:%S%z",
+        )
+    )
+    _error_logger.addHandler(handler)
+    return _error_logger
+
+
+class _AutoResumeContext(NamedTuple):
+    """Formatted strings for the auto-resume toast and system message."""
+
+    toast: str
+    system_message: str
+
+
+def _format_autoresume_context(
+    old_cwd: str,
+    new_cwd: str,
+    updated_at: str | None,
+) -> _AutoResumeContext:
+    """Build the toast and system-message text for an auto-resumed session.
+
+    Args:
+        old_cwd: Absolute CWD of the prior session.
+        new_cwd: Absolute CWD of the current session.
+        updated_at: ISO timestamp of the prior session's last update.
+
+    Returns:
+        An ``_AutoResumeContext`` with ``toast`` and ``system_message``.
+    """
+    from deepagents_cli.sessions import format_path, format_relative_timestamp
+
+    old_display = format_path(old_cwd)
+    new_display = format_path(new_cwd)
+    same_dir = Path(old_cwd).resolve() == Path(new_cwd).resolve()
+    age = format_relative_timestamp(updated_at)
+    age_suffix = f" ({age})" if age else ""
+    age_hint = f" The previous session was {age}." if age else ""
+
+    if same_dir:
+        toast = f"Forked prior session{age_suffix}"
+        system_message = (
+            f"This session was forked from a "
+            f"prior conversation in this same "
+            f"directory ({new_display}).{age_hint} "
+            f"Treat this as a new session but carry "
+            f"forward any useful context from the "
+            f"prior conversation."
+        )
+    else:
+        toast = (
+            f"Forked session from {old_display}"
+            f"{age_suffix} → {new_display}"
+        )
+        system_message = (
+            f"This session was forked from a "
+            f"prior conversation in {old_display}. "
+            f"The current working directory is now "
+            f"{new_display}.{age_hint} "
+            f"Treat this as a new session but carry "
+            f"forward any useful context from the "
+            f"prior conversation."
+        )
+
+    return _AutoResumeContext(toast=toast, system_message=system_message)
+
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -402,6 +499,8 @@ class TextualSessionState:
         """
         self.auto_approve = auto_approve
         self.thread_id = thread_id or _new_thread_id()
+        self.pending_system_message: str | None = None
+        """One-shot system message injected with the next user turn, then cleared."""
 
     def reset_thread(self) -> str:
         """Reset to a new thread.
@@ -591,6 +690,9 @@ class DeepAgentsApp(App):
         """
 
         self._resume_thread_intent = resume_thread
+
+        self._pending_autoresume_system_msg: str | None = None
+        self._autofork_source: dict[str, Any] | None = None
 
         self._initial_prompt = initial_prompt
 
@@ -1137,6 +1239,7 @@ class DeepAgentsApp(App):
         thread on any DB error.
         """
         from deepagents_cli.sessions import (
+            find_nearest_thread,
             find_similar_threads,
             generate_thread_id,
             get_most_recent,
@@ -1157,7 +1260,20 @@ class DeepAgentsApp(App):
         default_agent = "agent"
 
         try:
-            if resume == "__MOST_RECENT__":
+            if resume == "__AUTO_RESUME__":
+                nearest = await find_nearest_thread(self._cwd)
+                if nearest:
+                    # Store the nearest thread info; the actual fork happens
+                    # after the server starts via _fork_after_server_ready().
+                    self._autofork_source = nearest
+                    agent_name = nearest.get("agent_name")
+                    if agent_name:
+                        self._assistant_id = agent_name
+                        if self._server_kwargs:
+                            self._server_kwargs["assistant_id"] = agent_name
+                else:
+                    self._lc_thread_id = generate_thread_id()
+            elif resume == "__MOST_RECENT__":
                 agent_filter = (
                     self._assistant_id if self._assistant_id != default_agent else None
                 )
@@ -1202,6 +1318,42 @@ class DeepAgentsApp(App):
 
         # Update session state if ready (may still be initializing in a
         # concurrent worker)
+        if self._session_state:
+            self._session_state.thread_id = self._lc_thread_id
+
+    async def _fork_via_db(self, source: dict) -> None:
+        """Fork a thread via direct SQLite checkpoint copy.
+
+        The in-memory LangGraph runtime loads checkpoints lazily from the
+        SQLite persister on first stream with ``durability='exit'``.
+        Writing the forked checkpoint directly to SQLite is therefore
+        sufficient — the runtime will pick it up on the first agent turn.
+
+        Sets ``self._lc_thread_id`` to the new thread and shows the
+        autofork toast + system message on success.  Falls back to a
+        fresh thread on any error.
+        """
+        from deepagents_cli.sessions import fork_thread, generate_thread_id
+
+        source_id = source["thread_id"]
+        try:
+            new_id = await fork_thread(source_id)
+            if new_id:
+                self._lc_thread_id = new_id
+                ctx = _format_autoresume_context(
+                    old_cwd=source.get("cwd") or self._cwd,
+                    new_cwd=self._cwd,
+                    updated_at=source.get("updated_at"),
+                )
+                self.notify(ctx.toast, markup=False)
+                self._pending_autoresume_system_msg = ctx.system_message
+            else:
+                logger.warning("fork_thread returned None for %s", source_id)
+                self._lc_thread_id = generate_thread_id()
+        except Exception:
+            logger.exception("Failed to fork thread %s", source_id)
+            self._lc_thread_id = generate_thread_id()
+
         if self._session_state:
             self._session_state.thread_id = self._lc_thread_id
 
@@ -1274,6 +1426,12 @@ class DeepAgentsApp(App):
                 results[1],
                 exc_info=results[1],
             )
+
+        # Autofork: copy the source thread's checkpoint in SQLite.
+        # The runtime loads checkpoints lazily on first stream.
+        if self._autofork_source is not None:
+            await self._fork_via_db(self._autofork_source)
+            self._autofork_source = None
 
         self.post_message(
             self.ServerReady(
@@ -3268,6 +3426,13 @@ class DeepAgentsApp(App):
             return
         from deepagents_cli.textual_adapter import execute_task_textual
 
+        # Drain any one-shot system message queued by auto-resume.
+        if self._pending_autoresume_system_msg and self._session_state:
+            self._session_state.pending_system_message = (
+                self._pending_autoresume_system_msg
+            )
+            self._pending_autoresume_system_msg = None
+
         # Create the stats object up-front and store on the app so
         # exit() can merge it synchronously if the worker is cancelled
         # before this method can return (e.g. Ctrl+D during HITL).
@@ -3293,6 +3458,54 @@ class DeepAgentsApp(App):
             )
         except Exception as e:  # Resilient tool rendering
             logger.exception("Agent execution failed")
+
+            # Always persist the full traceback to ~/.deepagents/error.log
+            # so failures are diagnosable without DEEPAGENTS_CLI_DEBUG.
+            import traceback as _tb
+
+            err_detail = _tb.format_exc()
+            # Walk the exception chain to surface the root cause —
+            # OpenAI SDK wraps many errors as APIConnectionError.
+            cause_chain: list[str] = []
+            cause = e.__cause__
+            while cause is not None:
+                cause_chain.append(f"{type(cause).__name__}: {cause}")
+                cause = cause.__cause__
+            cause_info = " <- ".join(cause_chain) if cause_chain else ""
+
+            # Include HTTP response body when available (LangGraph SDK /
+            # httpx errors often carry it).
+            response_body = ""
+            with suppress(Exception):  # Best-effort extraction
+                if hasattr(e, "response"):
+                    response_body = e.response.text  # type: ignore[union-attr]
+            with suppress(Exception):  # Best-effort extraction
+                if hasattr(e, "body"):
+                    response_body = json.dumps(e.body)  # type: ignore[union-attr]
+            # Include the tail of the LangGraph server log when available —
+            # the server sanitizes exceptions to "An internal error occurred"
+            # so the real cause is only visible in its own log file.
+            server_log_tail = ""
+            with suppress(Exception):  # Best-effort log read
+                if self._server_proc and hasattr(self._server_proc, "_log_file"):
+                    lf = self._server_proc._log_file
+                    if lf is not None:
+                        lf.flush()
+                        server_log_tail = Path(lf.name).read_text(  # noqa: ASYNC240
+                            encoding="utf-8", errors="replace"
+                        )[-4000:]
+            _get_error_logger().error(
+                "Agent execution failed | thread=%s | error=%s "
+                "| cause_chain=%s | response=%s "
+                "| traceback:\n%s\n--- server log tail ---\n%s",
+                self._lc_thread_id,
+                repr(e),
+                cause_info,
+                response_body,
+                err_detail,
+                server_log_tail,
+            )
+
             # Ensure any in-flight tool calls don't remain stuck in "Running..."
             # when streaming aborts before tool results arrive.
             if self._ui_adapter:
@@ -3512,7 +3725,14 @@ class DeepAgentsApp(App):
             return {}
 
         config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-        state = await self._agent.aget_state(config)
+        try:
+            state = await self._agent.aget_state(config)
+        except TypeError:
+            # RemoteGraph._create_state_snapshot crashes with
+            # "'NoneType' object is not subscriptable" when the runtime
+            # returns a thread with checkpoint=None (e.g. forked threads
+            # whose checkpoints only exist in the SQLite persister).
+            state = None
 
         values: dict[str, Any] = {}
         if state and state.values:
@@ -3780,6 +4000,14 @@ class DeepAgentsApp(App):
             logger.exception(
                 "Failed to load thread history for %s",
                 history_thread_id,
+            )
+            import traceback as _tb
+
+            _get_error_logger().error(
+                "History load failed | thread=%s | error=%s | traceback:\n%s",
+                history_thread_id,
+                repr(e),
+                _tb.format_exc(),
             )
             await self._mount_message(AppMessage(f"Could not load history: {e}"))
 

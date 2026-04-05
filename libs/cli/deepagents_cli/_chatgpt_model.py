@@ -10,12 +10,18 @@ model can search the web alongside regular function tools.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Any
+import logging
+from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import BaseMessage
-from langchain_core.outputs import ChatGenerationChunk, ChatResult
+from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from langchain_core.outputs import ChatGenerationChunk, ChatResult
+
+logger = logging.getLogger(__name__)
 
 _WEB_SEARCH_TOOL = {"type": "web_search"}
 
@@ -43,8 +49,70 @@ def _inject_web_search(kwargs: dict[str, Any]) -> None:
         tools.append(_WEB_SEARCH_TOOL)
 
 
+def _extract_system_to_instructions(
+    messages: list[BaseMessage],
+) -> tuple[list[BaseMessage], str | None]:
+    """Move SystemMessages out of the list and return them as instructions text.
+
+    The OpenAI Responses API rejects ``{"role": "system", ...}`` items in the
+    input array. The system prompt must be passed via the ``instructions``
+    parameter instead. This helper extracts all SystemMessages, concatenates
+    their text, and returns the filtered list together with the combined
+    instructions string (or ``None`` when there were no system messages).
+
+    Returns:
+        Tuple of (filtered messages, instructions text or None).
+    """
+    system_parts: list[str] = []
+    filtered: list[BaseMessage] = []
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            content = msg.content
+            if isinstance(content, str):
+                system_parts.append(content)
+            elif isinstance(content, list):
+                system_parts.extend(
+                    block if isinstance(block, str) else str(block)
+                    for block in content
+                )
+        else:
+            filtered.append(msg)
+    if not system_parts:
+        return messages, None
+    return filtered, "\n\n".join(system_parts)
+
+
 class ChatGPTOpenAI(ChatOpenAI):
     """ChatOpenAI variant for the ChatGPT backend API."""
+
+    def _prepare(  # noqa: PLR6301  # Intentionally an instance method for subclass override
+        self, messages: list[BaseMessage], kwargs: dict[str, Any]
+    ) -> list[BaseMessage]:
+        """Common pre-processing for every call path.
+
+        Returns:
+            Filtered message list (system messages extracted).
+        """
+        _strip_reasoning(messages)
+        _inject_web_search(kwargs)
+        # The Responses API rejects system-role items in the input array.
+        # Move them to the ``instructions`` parameter instead.
+        messages, instructions = _extract_system_to_instructions(messages)
+        if instructions is not None:
+            kwargs["instructions"] = instructions
+            logger.debug(
+                "Extracted %d system messages into instructions (%d chars)",
+                len([m for m in messages if isinstance(m, SystemMessage)]) + 1,
+                len(instructions),
+            )
+        msg_roles = [m.type for m in messages]
+        logger.debug(
+            "ChatGPTOpenAI._prepare: %d messages, roles=%s, instructions=%s",
+            len(messages),
+            msg_roles[:10],
+            "yes" if instructions else "no",
+        )
+        return messages
 
     def _generate(
         self,
@@ -52,8 +120,7 @@ class ChatGPTOpenAI(ChatOpenAI):
         stop: list[str] | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        _strip_reasoning(messages)
-        _inject_web_search(kwargs)
+        messages = self._prepare(messages, kwargs)
         return super()._generate(messages, stop=stop, **kwargs)
 
     def _stream(
@@ -62,8 +129,7 @@ class ChatGPTOpenAI(ChatOpenAI):
         stop: list[str] | None = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
-        _strip_reasoning(messages)
-        _inject_web_search(kwargs)
+        messages = self._prepare(messages, kwargs)
         yield from super()._stream(messages, stop=stop, **kwargs)
 
     async def _agenerate(
@@ -72,17 +138,29 @@ class ChatGPTOpenAI(ChatOpenAI):
         stop: list[str] | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        _strip_reasoning(messages)
-        _inject_web_search(kwargs)
-        return await super()._agenerate(messages, stop=stop, **kwargs)
+        messages = self._prepare(messages, kwargs)
+        try:
+            return await super()._agenerate(messages, stop=stop, **kwargs)
+        except Exception:
+            logger.exception(
+                "ChatGPTOpenAI._agenerate failed (%d messages)",
+                len(messages),
+            )
+            raise
 
     async def _astream(
         self,
         messages: list[BaseMessage],
         stop: list[str] | None = None,
         **kwargs: Any,
-    ) -> Any:
-        _strip_reasoning(messages)
-        _inject_web_search(kwargs)
-        async for chunk in super()._astream(messages, stop=stop, **kwargs):
-            yield chunk
+    ) -> Any:  # noqa: ANN401  # Matching parent class signature
+        messages = self._prepare(messages, kwargs)
+        try:
+            async for chunk in super()._astream(messages, stop=stop, **kwargs):
+                yield chunk
+        except Exception:
+            logger.exception(
+                "ChatGPTOpenAI._astream failed (%d messages)",
+                len(messages),
+            )
+            raise
