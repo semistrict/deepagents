@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deepagents-full"
+version = "0.0.1"
+description = "Deep Agents CLI with all providers and ChatGPT auth"
+license = { text = "MIT" }
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "deepagents-cli[codex-chatgpt-auth,openrouter]",
+]
+
+[project.scripts]
+deepagents = "deepagents_cli:cli_main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deepagents_full"]
+
+[tool.uv.sources]
+deepagents-cli = { path = "../cli", editable = true }
+langchain-codex-chatgpt-auth = { path = "../codex-chatgpt-auth", editable = true }
+deepagents = { path = "../deepagents", editable = true }
