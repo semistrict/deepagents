@@ -1211,13 +1211,20 @@ class DeepAgentsApp(App):
                             self._assistant_id = agent_name
                             if self._server_kwargs:
                                 self._server_kwargs["assistant_id"] = agent_name
-                        from deepagents_cli.sessions import format_path
+                        from deepagents_cli.sessions import (
+                            format_path,
+                            format_relative_timestamp,
+                        )
 
                         old_display = format_path(nearest.get("cwd"))
                         new_display = format_path(self._cwd)
+                        age = format_relative_timestamp(
+                            nearest.get("updated_at")
+                        )
+                        age_suffix = f" ({age})" if age else ""
                         self.notify(
                             f"Resuming session from {old_display}"
-                            f" → {new_display}",
+                            f"{age_suffix} → {new_display}",
                             markup=False,
                         )
                         # Queue a system message so the agent knows
@@ -1225,11 +1232,17 @@ class DeepAgentsApp(App):
                         # app because _session_state may not be initialised
                         # yet (concurrent worker).  Transferred in
                         # _run_agent_task before the first turn.
+                        age_hint = (
+                            f" The previous session was {age}."
+                            if age
+                            else ""
+                        )
                         self._pending_autoresume_system_msg = (
                             f"This session was auto-resumed from a prior "
                             f"conversation in {old_display}. "
                             f"The current working directory is now "
-                            f"{new_display}. Treat this as a new session "
+                            f"{new_display}.{age_hint} "
+                            f"Treat this as a new session "
                             f"but carry forward any useful context from "
                             f"the prior conversation."
                         )
