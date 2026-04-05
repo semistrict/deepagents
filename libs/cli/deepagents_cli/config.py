@@ -396,6 +396,13 @@ def _resolve_editable_info() -> tuple[bool, str | None]:
     editable = False
     path: str | None = None
 
+    # Nuitka-compiled binaries lack package metadata entirely.
+    # Nuitka's distribution() fast-path raises before the try/except can
+    # catch it, so we skip entirely when running as a compiled binary.
+    if getattr(sys.modules.get(__name__), "__compiled__", None) is not None:
+        _editable_cache = (False, None)
+        return _editable_cache
+
     try:
         dist = distribution("deepagents-cli")
         raw = dist.read_text("direct_url.json")
