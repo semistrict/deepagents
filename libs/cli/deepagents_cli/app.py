@@ -138,9 +138,9 @@ def _format_autoresume_context(
     age_hint = f" The previous session was {age}." if age else ""
 
     if same_dir:
-        toast = f"Resuming prior session{age_suffix}"
+        toast = f"Forked prior session{age_suffix}"
         system_message = (
-            f"This session was auto-resumed from a "
+            f"This session was forked from a "
             f"prior conversation in this same "
             f"directory ({new_display}).{age_hint} "
             f"Treat this as a new session but carry "
@@ -149,11 +149,11 @@ def _format_autoresume_context(
         )
     else:
         toast = (
-            f"Resuming session from {old_display}"
+            f"Forked session from {old_display}"
             f"{age_suffix} → {new_display}"
         )
         system_message = (
-            f"This session was auto-resumed from a "
+            f"This session was forked from a "
             f"prior conversation in {old_display}. "
             f"The current working directory is now "
             f"{new_display}.{age_hint} "

@@ -2115,33 +2115,33 @@ class TestExperimentEnabled:
     """Tests for _experiment_enabled helper."""
 
     def test_enabled_single(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "autoresume")
-        assert _experiment_enabled("autoresume") is True
+        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "autofork")
+        assert _experiment_enabled("autofork") is True
 
     def test_enabled_comma_separated(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "autoresume,other")
-        assert _experiment_enabled("autoresume") is True
+        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "autofork,other")
+        assert _experiment_enabled("autofork") is True
         assert _experiment_enabled("other") is True
 
     def test_disabled_when_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "other")
-        assert _experiment_enabled("autoresume") is False
+        assert _experiment_enabled("autofork") is False
 
     def test_empty_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "")
-        assert _experiment_enabled("autoresume") is False
+        assert _experiment_enabled("autofork") is False
 
     def test_unset_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("DEEP_AGENTS_EXPERIMENTS", raising=False)
-        assert _experiment_enabled("autoresume") is False
+        assert _experiment_enabled("autofork") is False
 
     def test_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "AutoResume")
-        assert _experiment_enabled("autoresume") is True
+        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "AutoFork")
+        assert _experiment_enabled("autofork") is True
 
     def test_whitespace_handling(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "  autoresume , other  ")
-        assert _experiment_enabled("autoresume") is True
+        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "  autofork , other  ")
+        assert _experiment_enabled("autofork") is True
         assert _experiment_enabled("other") is True
 
 
@@ -2167,9 +2167,9 @@ class TestFormatAutoresumeContext:
     def test_same_dir(self, tmp_path: Path) -> None:
         cwd = str(tmp_path / "project")
         ctx = _format_autoresume_context(cwd, cwd, "2025-01-01T00:00:00+00:00")
-        # Toast should NOT have an arrow — just "Resuming prior session".
+        # Toast should NOT have an arrow — just "Forked prior session".
         assert "→" not in ctx.toast
-        assert "Resuming prior session" in ctx.toast
+        assert "Forked prior session" in ctx.toast
         # System message should say "this same directory".
         assert "this same directory" in ctx.system_message
         assert "current working directory" not in ctx.system_message

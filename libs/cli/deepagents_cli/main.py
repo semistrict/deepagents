@@ -1542,7 +1542,7 @@ def cli_main() -> None:
 
             # Auto-resume: when no explicit -r and the experiment is active,
             # signal the TUI to find and fork the nearest prior session.
-            if resume_thread is None and _experiment_enabled("autoresume"):
+            if resume_thread is None and _experiment_enabled("autofork"):
                 resume_thread = "__AUTO_RESUME__"
 
             thread_id = None if resume_thread else generate_thread_id()
