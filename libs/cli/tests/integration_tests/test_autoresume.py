@@ -133,6 +133,103 @@ async def test_fork_thread_and_stream(
         model_config.clear_caches()
 
 
+@pytest.mark.timeout(180)
+async def test_fork_across_server_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fork a thread from a prior server session and stream in a new one.
+
+    This is the real user flow: the source thread was created in a previous
+    ``deepagents`` invocation (different server process). The new server's
+    in-memory runtime has no knowledge of it — only the SQLite checkpointer
+    has the data.  The fork must ensure the thread is loaded from the
+    persister before calling /threads/<id>/copy.
+
+    This test would have caught the 409 Conflict bug where /copy failed
+    because the source thread didn't exist in the new runtime.
+    """
+    home_dir = tmp_path / "home"
+    project_dir = tmp_path / "project"
+    assistant_id = "itest-fork-restart"
+
+    home_dir.mkdir()
+    project_dir.mkdir()
+
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("DEEPAGENTS_CLI_NO_UPDATE_CHECK", "1")
+    monkeypatch.chdir(project_dir)
+
+    _write_model_config(home_dir)
+
+    from deepagents_cli import model_config
+    from deepagents_cli.config import create_model
+    from deepagents_cli.server_manager import server_session
+    from deepagents_cli.sessions import generate_thread_id, thread_exists
+
+    config_path = home_dir / ".deepagents" / "config.toml"
+    monkeypatch.setattr(model_config, "DEFAULT_CONFIG_DIR", config_path.parent)
+    monkeypatch.setattr(model_config, "DEFAULT_CONFIG_PATH", config_path)
+
+    model_config.clear_caches()
+    try:
+        create_model("itest:fake").apply_to_settings()
+        source_thread_id = generate_thread_id()
+
+        # Server 1: create a thread and shut down.
+        async with server_session(
+            assistant_id=assistant_id,
+            model_name="itest:fake",
+            no_mcp=True,
+            enable_shell=False,
+            interactive=True,
+            sandbox_type="none",
+        ) as (agent, _):
+            await _run_turn(
+                agent,
+                thread_id=source_thread_id,
+                assistant_id=assistant_id,
+                prompt="Remember this number: 42",
+            )
+
+        assert await thread_exists(source_thread_id)
+
+        # Server 2: fresh process — source thread only in SQLite.
+        async with server_session(
+            assistant_id=assistant_id,
+            model_name="itest:fake",
+            no_mcp=True,
+            enable_shell=False,
+            interactive=True,
+            sandbox_type="none",
+        ) as (agent, _):
+            graph = agent._get_graph()
+            client = graph._validate_client()
+
+            # Replicate the _fork_via_server logic: ensure thread is loaded,
+            # then copy.
+            try:
+                await client.threads.get(source_thread_id)
+            except Exception:
+                await client.threads.create(
+                    thread_id=source_thread_id, if_exists="do_nothing"
+                )
+            resp = await client.http.post(
+                f"/threads/{source_thread_id}/copy", json={}
+            )
+            forked_thread_id = resp["thread_id"]
+            assert forked_thread_id != source_thread_id
+
+            # Stream against the fork in the new server.
+            await _run_turn(
+                agent,
+                thread_id=forked_thread_id,
+                assistant_id=assistant_id,
+                prompt="hi",
+            )
+    finally:
+        model_config.clear_caches()
+
+
 @pytest.mark.timeout(120)
 @pytest.mark.skipif(not _OPENROUTER_KEY, reason="OPENROUTER_API_KEY not set")
 async def test_fork_thread_and_stream_openrouter(
