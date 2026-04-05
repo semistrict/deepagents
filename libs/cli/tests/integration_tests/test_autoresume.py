@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+_OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+# Use OpenAI provider pointed at OpenRouter's base URL with a cheap model.
+_OPENROUTER_MODEL = "openai:openai/gpt-4.1-nano"
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 def _write_model_config(home_dir: Path) -> None:
@@ -132,5 +139,92 @@ async def test_fork_thread_and_stream(
 
         # Source thread should be unchanged.
         assert await thread_exists(source_thread_id)
+    finally:
+        model_config.clear_caches()
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.skipif(not _OPENROUTER_KEY, reason="OPENROUTER_API_KEY not set")
+async def test_fork_thread_and_stream_openrouter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fork a thread created with an OpenRouter model and stream against it.
+
+    Verifies that the forked checkpoint's message history (which includes
+    system messages from the agent prompt) is accepted by the real LLM API.
+    Skipped when OPENROUTER_API_KEY is not set.
+    """
+    home_dir = tmp_path / "home"
+    project_dir = tmp_path / "project"
+    assistant_id = "itest-fork-or"
+
+    home_dir.mkdir()
+    project_dir.mkdir()
+
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("DEEPAGENTS_CLI_NO_UPDATE_CHECK", "1")
+    # Use OpenRouter via the OpenAI provider by setting the base URL + key.
+    monkeypatch.setenv("OPENAI_API_KEY", _OPENROUTER_KEY)
+    monkeypatch.setenv("OPENAI_BASE_URL", _OPENROUTER_BASE_URL)
+    monkeypatch.chdir(project_dir)
+
+    _write_model_config(home_dir)
+
+    from deepagents_cli import model_config
+    from deepagents_cli.config import create_model
+    from deepagents_cli.server_manager import server_session
+    from deepagents_cli.sessions import (
+        fork_thread,
+        generate_thread_id,
+        thread_exists,
+    )
+
+    config_path = home_dir / ".deepagents" / "config.toml"
+    monkeypatch.setattr(model_config, "DEFAULT_CONFIG_DIR", config_path.parent)
+    monkeypatch.setattr(model_config, "DEFAULT_CONFIG_PATH", config_path)
+
+    model_config.clear_caches()
+    try:
+        create_model(_OPENROUTER_MODEL).apply_to_settings()
+        source_thread_id = generate_thread_id()
+
+        # Phase 1: seed a thread with one real turn.
+        async with server_session(
+            assistant_id=assistant_id,
+            model_name=_OPENROUTER_MODEL,
+            no_mcp=True,
+            enable_shell=False,
+            interactive=True,
+            sandbox_type="none",
+        ) as (agent, _server_proc):
+            await _run_turn(
+                agent,
+                thread_id=source_thread_id,
+                assistant_id=assistant_id,
+                prompt="Say hello in one word.",
+            )
+
+        assert await thread_exists(source_thread_id)
+
+        # Phase 2: fork.
+        forked_thread_id = await fork_thread(source_thread_id)
+        assert forked_thread_id is not None
+
+        # Phase 3: stream against the fork — this is where the
+        # "System messages are not allowed" error occurred.
+        async with server_session(
+            assistant_id=assistant_id,
+            model_name=_OPENROUTER_MODEL,
+            no_mcp=True,
+            enable_shell=False,
+            interactive=True,
+            sandbox_type="none",
+        ) as (agent, _server_proc):
+            await _run_turn(
+                agent,
+                thread_id=forked_thread_id,
+                assistant_id=assistant_id,
+                prompt="What did I just ask you?",
+            )
     finally:
         model_config.clear_caches()
