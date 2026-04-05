@@ -694,7 +694,7 @@ class DeepAgentsApp(App):
         self._resume_thread_intent = resume_thread
 
         self._pending_autoresume_system_msg: str | None = None
-        self._autofork_source: dict | None = None
+        self._autofork_source: dict[str, Any] | None = None
 
         self._initial_prompt = initial_prompt
 
@@ -4007,6 +4007,14 @@ class DeepAgentsApp(App):
             logger.exception(
                 "Failed to load thread history for %s",
                 history_thread_id,
+            )
+            import traceback as _tb
+
+            _get_error_logger().error(
+                "History load failed | thread=%s | error=%s | traceback:\n%s",
+                history_thread_id,
+                repr(e),
+                _tb.format_exc(),
             )
             await self._mount_message(AppMessage(f"Could not load history: {e}"))
 
