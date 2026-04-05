@@ -409,7 +409,7 @@ def _resolve_editable_info() -> tuple[bool, str | None]:
                     home = str(Path.home())
                     if path.startswith(home):
                         path = "~" + path[len(home) :]
-    except (PackageNotFoundError, FileNotFoundError, json.JSONDecodeError, TypeError):
+    except Exception:  # noqa: BLE001  # Compiled binaries may lack package metadata
         logger.debug(
             "Failed to read editable install info from PEP 610 metadata",
             exc_info=True,
