@@ -1336,6 +1336,16 @@ class DeepAgentsApp(App):
         try:
             graph = agent._get_graph()
             client = graph._validate_client()
+            # Ensure the source thread is loaded into the in-memory runtime
+            # (it may have been created in a prior server session and only
+            # exists in the SQLite checkpointer).
+            try:
+                await client.threads.get(source_id)
+            except Exception:
+                # Thread not in runtime — create a stub so /copy has a target.
+                await client.threads.create(
+                    thread_id=source_id, if_exists="do_nothing"
+                )
             resp = await client.http.post(f"/threads/{source_id}/copy", json={})
             new_thread = resp.get("thread_id") if isinstance(resp, dict) else None
             if new_thread:
