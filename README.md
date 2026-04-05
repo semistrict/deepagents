@@ -83,6 +83,14 @@ A pre-built coding agent in your terminal — similar to Claude Code or Cursor �
 curl -LsSf https://raw.githubusercontent.com/langchain-ai/deepagents/main/libs/cli/scripts/install.sh | bash
 ```
 
+Or install with all providers and ChatGPT auth (requires [uv](https://docs.astral.sh/uv/)):
+
+```bash
+uv tool install 'deepagents-full @ git+https://github.com/semistrict/deepagents#subdirectory=libs/deepagents-full'
+```
+
+This includes OpenAI, Anthropic, Google, OpenRouter, and ChatGPT OAuth support (via `codex login`).
+
 **Highlights:**
 
 - **Interactive TUI** — rich terminal interface with streaming responses
