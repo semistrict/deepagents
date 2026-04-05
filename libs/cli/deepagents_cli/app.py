@@ -694,6 +694,7 @@ class DeepAgentsApp(App):
         self._resume_thread_intent = resume_thread
 
         self._pending_autoresume_system_msg: str | None = None
+        self._autofork_source: dict | None = None
 
         self._initial_prompt = initial_prompt
 
@@ -1242,7 +1243,6 @@ class DeepAgentsApp(App):
         from deepagents_cli.sessions import (
             find_nearest_thread,
             find_similar_threads,
-            fork_thread,
             generate_thread_id,
             get_most_recent,
             get_thread_agent,
@@ -1265,28 +1265,14 @@ class DeepAgentsApp(App):
             if resume == "__AUTO_RESUME__":
                 nearest = await find_nearest_thread(self._cwd)
                 if nearest:
-                    new_id = await fork_thread(nearest["thread_id"])
-                    if new_id:
-                        self._lc_thread_id = new_id
-                        agent_name = nearest.get("agent_name")
-                        if agent_name:
-                            self._assistant_id = agent_name
-                            if self._server_kwargs:
-                                self._server_kwargs["assistant_id"] = agent_name
-                        ctx = _format_autoresume_context(
-                            old_cwd=nearest.get("cwd") or self._cwd,
-                            new_cwd=self._cwd,
-                            updated_at=nearest.get("updated_at"),
-                        )
-                        self.notify(ctx.toast, markup=False)
-                        # Queue a system message so the agent knows
-                        # the session context has changed.  Stored on the
-                        # app because _session_state may not be initialised
-                        # yet (concurrent worker).  Transferred in
-                        # _run_agent_task before the first turn.
-                        self._pending_autoresume_system_msg = ctx.system_message
-                    else:
-                        self._lc_thread_id = generate_thread_id()
+                    # Store the nearest thread info; the actual fork happens
+                    # after the server starts via _fork_after_server_ready().
+                    self._autofork_source = nearest
+                    agent_name = nearest.get("agent_name")
+                    if agent_name:
+                        self._assistant_id = agent_name
+                        if self._server_kwargs:
+                            self._server_kwargs["assistant_id"] = agent_name
                 else:
                     self._lc_thread_id = generate_thread_id()
             elif resume == "__MOST_RECENT__":
@@ -1334,6 +1320,40 @@ class DeepAgentsApp(App):
 
         # Update session state if ready (may still be initializing in a
         # concurrent worker)
+        if self._session_state:
+            self._session_state.thread_id = self._lc_thread_id
+
+    async def _fork_via_server(self, agent: Any, source: dict) -> None:
+        """Copy a thread via the server's ``/threads/<id>/copy`` endpoint.
+
+        Sets ``self._lc_thread_id`` to the new thread and shows the
+        autofork toast + system message on success.  Falls back to a
+        fresh thread on any error.
+        """
+        from deepagents_cli.sessions import generate_thread_id
+
+        source_id = source["thread_id"]
+        try:
+            graph = agent._get_graph()
+            client = graph._validate_client()
+            resp = await client.http.post(f"/threads/{source_id}/copy", json={})
+            new_thread = resp.get("thread_id") if isinstance(resp, dict) else None
+            if new_thread:
+                self._lc_thread_id = new_thread
+                ctx = _format_autoresume_context(
+                    old_cwd=source.get("cwd") or self._cwd,
+                    new_cwd=self._cwd,
+                    updated_at=source.get("updated_at"),
+                )
+                self.notify(ctx.toast, markup=False)
+                self._pending_autoresume_system_msg = ctx.system_message
+            else:
+                logger.warning("Thread copy returned no thread_id: %s", resp)
+                self._lc_thread_id = generate_thread_id()
+        except Exception:
+            logger.exception("Failed to fork thread %s via server", source_id)
+            self._lc_thread_id = generate_thread_id()
+
         if self._session_state:
             self._session_state.thread_id = self._lc_thread_id
 
@@ -1406,6 +1426,12 @@ class DeepAgentsApp(App):
                 results[1],
                 exc_info=results[1],
             )
+
+        # Autofork: copy the source thread via the server's /copy API
+        # now that the server is running.
+        if self._autofork_source is not None:
+            await self._fork_via_server(agent, self._autofork_source)
+            self._autofork_source = None
 
         self.post_message(
             self.ServerReady(

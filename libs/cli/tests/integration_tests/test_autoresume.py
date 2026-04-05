@@ -73,7 +73,6 @@ async def test_fork_thread_and_stream(
     from deepagents_cli.config import create_model
     from deepagents_cli.server_manager import server_session
     from deepagents_cli.sessions import (
-        fork_thread,
         generate_thread_id,
         thread_exists,
     )
@@ -87,7 +86,8 @@ async def test_fork_thread_and_stream(
         create_model("itest:fake").apply_to_settings()
         source_thread_id = generate_thread_id()
 
-        # Phase 1: create a real persisted thread with a few turns.
+        # All phases run against the same server session so the in-memory
+        # runtime sees the thread copy (matching the real autofork flow).
         async with server_session(
             assistant_id=assistant_id,
             model_name="itest:fake",
@@ -96,6 +96,7 @@ async def test_fork_thread_and_stream(
             interactive=True,
             sandbox_type="none",
         ) as (agent, _server_proc):
+            # Phase 1: create a persisted thread with a few turns.
             for i in range(1, 4):
                 await _run_turn(
                     agent,
@@ -104,30 +105,19 @@ async def test_fork_thread_and_stream(
                     prompt=f"Turn {i}: tell me something interesting.",
                 )
 
-        assert await thread_exists(source_thread_id)
+            # Phase 2: fork via the server's /threads/<id>/copy API.
+            graph = agent._get_graph()
+            client = graph._validate_client()
+            resp = await client.http.post(f"/threads/{source_thread_id}/copy", json={})
+            forked_thread_id = resp["thread_id"]
+            assert forked_thread_id != source_thread_id
 
-        # Phase 2: fork the thread.
-        forked_thread_id = await fork_thread(source_thread_id)
-        assert forked_thread_id is not None
-        assert forked_thread_id != source_thread_id
-        assert await thread_exists(forked_thread_id)
-
-        # Phase 3: stream a new turn against the forked thread.
-        # This is where the BadRequestError occurred.
-        async with server_session(
-            assistant_id=assistant_id,
-            model_name="itest:fake",
-            no_mcp=True,
-            enable_shell=False,
-            interactive=True,
-            sandbox_type="none",
-        ) as (agent, _server_proc):
-            # This should NOT raise.
+            # Phase 3: stream against the forked thread in the same server.
             await _run_turn(
                 agent,
                 thread_id=forked_thread_id,
                 assistant_id=assistant_id,
-                prompt="[SYSTEM] This session was auto-resumed. "
+                prompt="[SYSTEM] This session was auto-forked. "
                 "Treat this as a new session but carry forward context.",
             )
             await _run_turn(
@@ -173,11 +163,7 @@ async def test_fork_thread_and_stream_openrouter(
     from deepagents_cli import model_config
     from deepagents_cli.config import create_model
     from deepagents_cli.server_manager import server_session
-    from deepagents_cli.sessions import (
-        fork_thread,
-        generate_thread_id,
-        thread_exists,
-    )
+    from deepagents_cli.sessions import generate_thread_id
 
     config_path = home_dir / ".deepagents" / "config.toml"
     monkeypatch.setattr(model_config, "DEFAULT_CONFIG_DIR", config_path.parent)
@@ -188,7 +174,6 @@ async def test_fork_thread_and_stream_openrouter(
         create_model(_OPENROUTER_MODEL).apply_to_settings()
         source_thread_id = generate_thread_id()
 
-        # Phase 1: seed a thread with one real turn.
         async with server_session(
             assistant_id=assistant_id,
             model_name=_OPENROUTER_MODEL,
@@ -197,6 +182,7 @@ async def test_fork_thread_and_stream_openrouter(
             interactive=True,
             sandbox_type="none",
         ) as (agent, _server_proc):
+            # Phase 1: seed a thread with one real turn.
             await _run_turn(
                 agent,
                 thread_id=source_thread_id,
@@ -204,22 +190,13 @@ async def test_fork_thread_and_stream_openrouter(
                 prompt="Say hello in one word.",
             )
 
-        assert await thread_exists(source_thread_id)
+            # Phase 2: fork via server API.
+            graph = agent._get_graph()
+            client = graph._validate_client()
+            resp = await client.http.post(f"/threads/{source_thread_id}/copy", json={})
+            forked_thread_id = resp["thread_id"]
 
-        # Phase 2: fork.
-        forked_thread_id = await fork_thread(source_thread_id)
-        assert forked_thread_id is not None
-
-        # Phase 3: stream against the fork — this is where the
-        # "System messages are not allowed" error occurred.
-        async with server_session(
-            assistant_id=assistant_id,
-            model_name=_OPENROUTER_MODEL,
-            no_mcp=True,
-            enable_shell=False,
-            interactive=True,
-            sandbox_type="none",
-        ) as (agent, _server_proc):
+            # Phase 3: stream against the fork.
             await _run_turn(
                 agent,
                 thread_id=forked_thread_id,
