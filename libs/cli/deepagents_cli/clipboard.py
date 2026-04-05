@@ -52,7 +52,10 @@ def copy_selection_to_clipboard(app: App) -> None:
     selected_texts = []
 
     for widget in app.query("*"):
-        if not hasattr(widget, "text_selection") or not widget.text_selection:
+        try:
+            if not hasattr(widget, "text_selection") or not widget.text_selection:
+                continue
+        except Exception:
             continue
 
         selection = widget.text_selection
