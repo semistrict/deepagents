@@ -3438,6 +3438,15 @@ class DeepAgentsApp(App):
             import traceback as _tb
 
             err_detail = _tb.format_exc()
+            # Walk the exception chain to surface the root cause —
+            # OpenAI SDK wraps many errors as APIConnectionError.
+            cause_chain: list[str] = []
+            cause = e.__cause__
+            while cause is not None:
+                cause_chain.append(f"{type(cause).__name__}: {cause}")
+                cause = cause.__cause__
+            cause_info = " <- ".join(cause_chain) if cause_chain else ""
+
             # Include HTTP response body when available (LangGraph SDK /
             # httpx errors often carry it).
             response_body = ""
@@ -3466,9 +3475,10 @@ class DeepAgentsApp(App):
                 except Exception:
                     pass
             _get_error_logger().error(
-                "Agent execution failed | thread=%s | error=%s | response=%s | traceback:\n%s\n--- server log tail ---\n%s",
+                "Agent execution failed | thread=%s | error=%s | cause_chain=%s | response=%s | traceback:\n%s\n--- server log tail ---\n%s",
                 self._lc_thread_id,
                 repr(e),
+                cause_info,
                 response_body,
                 err_detail,
                 server_log_tail,

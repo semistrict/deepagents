@@ -10,12 +10,15 @@ model can search the web alongside regular function tools.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from typing import Any
 
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
+
+logger = logging.getLogger(__name__)
 
 _WEB_SEARCH_TOOL = {"type": "web_search"}
 
@@ -87,6 +90,18 @@ class ChatGPTOpenAI(ChatOpenAI):
         messages, instructions = _extract_system_to_instructions(messages)
         if instructions is not None:
             kwargs["instructions"] = instructions
+            logger.debug(
+                "Extracted %d system messages into instructions (%d chars)",
+                len([m for m in messages if isinstance(m, SystemMessage)]) + 1,
+                len(instructions),
+            )
+        msg_roles = [m.type for m in messages]
+        logger.debug(
+            "ChatGPTOpenAI._prepare: %d messages, roles=%s, instructions=%s",
+            len(messages),
+            msg_roles[:10],
+            "yes" if instructions else "no",
+        )
         return messages
 
     def _generate(
@@ -114,7 +129,14 @@ class ChatGPTOpenAI(ChatOpenAI):
         **kwargs: Any,
     ) -> ChatResult:
         messages = self._prepare(messages, kwargs)
-        return await super()._agenerate(messages, stop=stop, **kwargs)
+        try:
+            return await super()._agenerate(messages, stop=stop, **kwargs)
+        except Exception:
+            logger.exception(
+                "ChatGPTOpenAI._agenerate failed (%d messages)",
+                len(messages),
+            )
+            raise
 
     async def _astream(
         self,
@@ -123,5 +145,12 @@ class ChatGPTOpenAI(ChatOpenAI):
         **kwargs: Any,
     ) -> Any:
         messages = self._prepare(messages, kwargs)
-        async for chunk in super()._astream(messages, stop=stop, **kwargs):
-            yield chunk
+        try:
+            async for chunk in super()._astream(messages, stop=stop, **kwargs):
+                yield chunk
+        except Exception:
+            logger.exception(
+                "ChatGPTOpenAI._astream failed (%d messages)",
+                len(messages),
+            )
+            raise
