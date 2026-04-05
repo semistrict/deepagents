@@ -13,7 +13,7 @@ import pytest
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from deepagents_cli import sessions
-from deepagents_cli.app import TextualSessionState
+from deepagents_cli.app import TextualSessionState, _format_autoresume_context
 from deepagents_cli.main import _experiment_enabled
 from deepagents_cli.sessions import get_thread_limit
 
@@ -2143,3 +2143,54 @@ class TestExperimentEnabled:
         monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "  autoresume , other  ")
         assert _experiment_enabled("autoresume") is True
         assert _experiment_enabled("other") is True
+
+
+# ---------------------------------------------------------------------------
+# _format_autoresume_context tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatAutoresumeContext:
+    """Tests for _format_autoresume_context."""
+
+    def test_different_dirs(self, tmp_path: Path) -> None:
+        old = str(tmp_path / "project")
+        new = str(tmp_path / "project" / "subdir")
+        ctx = _format_autoresume_context(old, new, "2025-01-01T00:00:00+00:00")
+        # Toast should mention both dirs with an arrow.
+        assert "→" in ctx.toast
+        assert "project" in ctx.toast
+        # System message should mention old dir and new dir separately.
+        assert old.split("/")[-1] in ctx.system_message
+        assert "current working directory" in ctx.system_message
+
+    def test_same_dir(self, tmp_path: Path) -> None:
+        cwd = str(tmp_path / "project")
+        ctx = _format_autoresume_context(cwd, cwd, "2025-01-01T00:00:00+00:00")
+        # Toast should NOT have an arrow — just "Resuming prior session".
+        assert "→" not in ctx.toast
+        assert "Resuming prior session" in ctx.toast
+        # System message should say "this same directory".
+        assert "this same directory" in ctx.system_message
+        assert "current working directory" not in ctx.system_message
+
+    def test_age_appears_in_toast_and_system_msg(self) -> None:
+        now = datetime.now(UTC).isoformat()
+        ctx = _format_autoresume_context("/a", "/b", now)
+        # Recent timestamp should show "0s ago" or similar.
+        assert "ago" in ctx.toast
+        assert "previous session was" in ctx.system_message
+
+    def test_no_timestamp(self) -> None:
+        ctx = _format_autoresume_context("/a", "/b", None)
+        # No age suffix when timestamp is None.
+        assert "ago" not in ctx.toast
+        assert "previous session was" not in ctx.system_message
+
+    def test_old_dir_in_system_message_not_new(self, tmp_path: Path) -> None:
+        """When dirs differ, system message mentions old dir, not just new."""
+        old = str(tmp_path / "old-project")
+        new = str(tmp_path / "new-project")
+        ctx = _format_autoresume_context(old, new, None)
+        assert "old-project" in ctx.system_message
+        assert "new-project" in ctx.system_message

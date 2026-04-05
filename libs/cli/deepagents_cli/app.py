@@ -103,6 +103,68 @@ def _get_error_logger() -> logging.Logger:
     _error_logger.addHandler(handler)
     return _error_logger
 
+class _AutoResumeContext:
+    """Formatted strings for the auto-resume toast and system message."""
+
+    __slots__ = ("toast", "system_message")
+
+    def __init__(self, toast: str, system_message: str) -> None:
+        self.toast = toast
+        self.system_message = system_message
+
+
+def _format_autoresume_context(
+    old_cwd: str,
+    new_cwd: str,
+    updated_at: str | None,
+) -> _AutoResumeContext:
+    """Build the toast and system-message text for an auto-resumed session.
+
+    Args:
+        old_cwd: Absolute CWD of the prior session.
+        new_cwd: Absolute CWD of the current session.
+        updated_at: ISO timestamp of the prior session's last update.
+
+    Returns:
+        An ``_AutoResumeContext`` with ``toast`` and ``system_message``.
+    """
+    from deepagents_cli.sessions import format_path, format_relative_timestamp
+
+    old_display = format_path(old_cwd)
+    new_display = format_path(new_cwd)
+    same_dir = Path(old_cwd).resolve() == Path(new_cwd).resolve()
+    age = format_relative_timestamp(updated_at)
+    age_suffix = f" ({age})" if age else ""
+    age_hint = f" The previous session was {age}." if age else ""
+
+    if same_dir:
+        toast = f"Resuming prior session{age_suffix}"
+        system_message = (
+            f"This session was auto-resumed from a "
+            f"prior conversation in this same "
+            f"directory ({new_display}).{age_hint} "
+            f"Treat this as a new session but carry "
+            f"forward any useful context from the "
+            f"prior conversation."
+        )
+    else:
+        toast = (
+            f"Resuming session from {old_display}"
+            f"{age_suffix} → {new_display}"
+        )
+        system_message = (
+            f"This session was auto-resumed from a "
+            f"prior conversation in {old_display}. "
+            f"The current working directory is now "
+            f"{new_display}.{age_hint} "
+            f"Treat this as a new session but carry "
+            f"forward any useful context from the "
+            f"prior conversation."
+        )
+
+    return _AutoResumeContext(toast=toast, system_message=system_message)
+
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -1211,41 +1273,18 @@ class DeepAgentsApp(App):
                             self._assistant_id = agent_name
                             if self._server_kwargs:
                                 self._server_kwargs["assistant_id"] = agent_name
-                        from deepagents_cli.sessions import (
-                            format_path,
-                            format_relative_timestamp,
+                        ctx = _format_autoresume_context(
+                            old_cwd=nearest.get("cwd") or self._cwd,
+                            new_cwd=self._cwd,
+                            updated_at=nearest.get("updated_at"),
                         )
-
-                        old_display = format_path(nearest.get("cwd"))
-                        new_display = format_path(self._cwd)
-                        age = format_relative_timestamp(
-                            nearest.get("updated_at")
-                        )
-                        age_suffix = f" ({age})" if age else ""
-                        self.notify(
-                            f"Resuming session from {old_display}"
-                            f"{age_suffix} → {new_display}",
-                            markup=False,
-                        )
+                        self.notify(ctx.toast, markup=False)
                         # Queue a system message so the agent knows
                         # the session context has changed.  Stored on the
                         # app because _session_state may not be initialised
                         # yet (concurrent worker).  Transferred in
                         # _run_agent_task before the first turn.
-                        age_hint = (
-                            f" The previous session was {age}."
-                            if age
-                            else ""
-                        )
-                        self._pending_autoresume_system_msg = (
-                            f"This session was auto-resumed from a prior "
-                            f"conversation in {old_display}. "
-                            f"The current working directory is now "
-                            f"{new_display}.{age_hint} "
-                            f"Treat this as a new session "
-                            f"but carry forward any useful context from "
-                            f"the prior conversation."
-                        )
+                        self._pending_autoresume_system_msg = ctx.system_message
                     else:
                         self._lc_thread_id = generate_thread_id()
                 else:
