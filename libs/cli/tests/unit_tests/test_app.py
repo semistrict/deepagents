@@ -3012,3 +3012,45 @@ class TestDeferredActions:
 
             await app._drain_deferred_actions()
             assert executed == ["thread", "second_model"]
+
+
+class TestWebSearchCallWidget:
+    """Integration test: web_search ToolCallMessage renders in the Textual app."""
+
+    async def test_web_search_tool_message_renders_in_app(self) -> None:
+        """Mounting a web_search ToolCallMessage should produce a visible widget."""
+        from deepagents_cli.widgets.messages import ToolCallMessage
+
+        app = DeepAgentsApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+            tool_msg = ToolCallMessage("web_search", {"query": "latest news"})
+            await app._mount_message(tool_msg)
+            await pilot.pause()
+
+            # The widget should be in the DOM
+            results = app.query(ToolCallMessage)
+            assert len(list(results)) == 1
+
+            mounted = list(results)[0]
+            assert mounted._tool_name == "web_search"
+            assert mounted._args == {"query": "latest news"}
+
+    async def test_web_search_tool_message_shows_success(self) -> None:
+        """Setting success on a web_search ToolCallMessage should update status."""
+        from deepagents_cli.widgets.messages import ToolCallMessage
+
+        app = DeepAgentsApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+            tool_msg = ToolCallMessage("web_search", {"query": "python 3.14"})
+            await app._mount_message(tool_msg)
+            await pilot.pause()
+
+            tool_msg.set_success("Searched:\n  \u2022 python 3.14 release")
+            await pilot.pause()
+
+            assert tool_msg._status == "success"
+            assert "python 3.14 release" in tool_msg._output

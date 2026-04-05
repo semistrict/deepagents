@@ -1316,3 +1316,112 @@ class TestPrintUsageTable:
         print_usage_table(stats, wall_time=0.01, console=console)
         output = buf.getvalue()
         assert output.strip() == ""
+
+
+def _web_search_call_message(
+    query: str, ws_id: str, queries: list[str] | None = None
+) -> SimpleNamespace:
+    """Build a message-like object with a server_tool_call web_search block.
+
+    This matches the streaming format from langchain-openai's Responses API.
+    """
+    return SimpleNamespace(
+        content_blocks=[
+            {
+                "type": "server_tool_call",
+                "name": "web_search",
+                "id": ws_id,
+                "args": {
+                    "type": "search",
+                    "query": query,
+                    "queries": queries or [query],
+                },
+                "index": "lc_wsc_0",
+            }
+        ]
+    )
+
+
+class TestWebSearchCallRendering:
+    """Tests for web_search_call content block handling in the streaming loop."""
+
+    async def test_web_search_call_mounts_tool_message(self) -> None:
+        """A web_search_call block should mount a ToolCallMessage."""
+        from deepagents_cli.widgets.messages import ToolCallMessage
+
+        mounted_widgets: list[Any] = []
+
+        async def mount_message(widget: object) -> None:
+            await asyncio.sleep(0)
+            mounted_widgets.append(widget)
+
+        chunks = [
+            (
+                (),
+                "messages",
+                (
+                    _web_search_call_message(
+                        "latest python release", "ws-123"
+                    ),
+                    {},
+                ),
+            ),
+        ]
+
+        adapter = TextualUIAdapter(
+            mount_message=mount_message,
+            update_status=_noop_status,
+            request_approval=_mock_approval,
+            set_spinner=AsyncMock(),
+        )
+
+        await execute_task_textual(
+            user_input="search python",
+            agent=_FakeAgent(chunks),
+            assistant_id="assistant",
+            session_state=SimpleNamespace(thread_id="t-1", auto_approve=True),
+            adapter=adapter,
+        )
+
+        tool_msgs = [
+            w for w in mounted_widgets if isinstance(w, ToolCallMessage)
+        ]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0]._tool_name == "web_search"
+        assert tool_msgs[0]._args == {"query": "latest python release"}
+
+    async def test_web_search_call_deduplicates_by_id(self) -> None:
+        """Duplicate web_search_call blocks with the same ID should not mount twice."""
+        from deepagents_cli.widgets.messages import ToolCallMessage
+
+        mounted_widgets: list[Any] = []
+
+        async def mount_message(widget: object) -> None:
+            await asyncio.sleep(0)
+            mounted_widgets.append(widget)
+
+        ws_msg = _web_search_call_message("test query", "ws-dup")
+        chunks = [
+            ((), "messages", (ws_msg, {})),
+            ((), "messages", (ws_msg, {})),
+        ]
+
+        adapter = TextualUIAdapter(
+            mount_message=mount_message,
+            update_status=_noop_status,
+            request_approval=_mock_approval,
+            set_spinner=AsyncMock(),
+        )
+
+        await execute_task_textual(
+            user_input="search test",
+            agent=_FakeAgent(chunks),
+            assistant_id="assistant",
+            session_state=SimpleNamespace(thread_id="t-1", auto_approve=True),
+            adapter=adapter,
+        )
+
+        tool_msgs = [
+            w for w in mounted_widgets if isinstance(w, ToolCallMessage)
+        ]
+        assert len(tool_msgs) == 1

@@ -348,6 +348,20 @@ def _process_ai_message(
                     f"[dim]🔧 Calling tool: {escape_markup(chunk_name)}[/dim]",
                     highlight=False,
                 )
+        elif (
+            block_type == "web_search_call"
+            or (block_type == "server_tool_call" and block.get("name") == "web_search")
+        ):
+            args = block.get("args") or {}
+            action = block.get("action") or args
+            query = action.get("query", "")
+            if query and state.spinner:
+                state.spinner.stop()
+            if query:
+                console.print(
+                    f"[dim]🔍 Web search: {escape_markup(query)}[/dim]",
+                    highlight=False,
+                )
 
 
 def _process_message_chunk(
