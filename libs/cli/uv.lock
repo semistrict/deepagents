@@ -1097,6 +1097,9 @@ baseten = [
 bedrock = [
     { name = "langchain-aws" },
 ]
+codex-chatgpt-auth = [
+    { name = "langchain-codex-chatgpt-auth" },
+]
 cohere = [
     { name = "langchain-cohere" },
 ]
@@ -1189,6 +1192,7 @@ requires-dist = [
     { name = "langchain-anthropic", marker = "extra == 'anthropic'", specifier = ">=1.4.0,<2.0.0" },
     { name = "langchain-aws", marker = "extra == 'bedrock'", specifier = ">=1.0.0,<2.0.0" },
     { name = "langchain-baseten", marker = "extra == 'baseten'", specifier = ">=0.1.9,<1.0.0" },
+    { name = "langchain-codex-chatgpt-auth", marker = "extra == 'codex-chatgpt-auth'", editable = "../codex-chatgpt-auth" },
     { name = "langchain-cohere", marker = "extra == 'cohere'", specifier = ">=0.5.0,<1.0.0" },
     { name = "langchain-daytona", marker = "extra == 'daytona'", editable = "../partners/daytona" },
     { name = "langchain-deepseek", marker = "extra == 'deepseek'", specifier = ">=1.0.0,<2.0.0" },
@@ -1232,7 +1236,7 @@ requires-dist = [
     { name = "tomli-w", specifier = ">=1.0.0,<2.0.0" },
     { name = "uuid-utils", specifier = ">=0.10.0,<1.0.0" },
 ]
-provides-extras = ["anthropic", "baseten", "bedrock", "cohere", "deepseek", "fireworks", "google-genai", "groq", "huggingface", "ibm", "litellm", "mistralai", "nvidia", "ollama", "openai", "openrouter", "perplexity", "vertexai", "xai", "agentcore", "daytona", "modal", "runloop", "all-sandboxes", "all-providers"]
+provides-extras = ["anthropic", "baseten", "bedrock", "cohere", "deepseek", "fireworks", "google-genai", "groq", "huggingface", "ibm", "litellm", "mistralai", "nvidia", "ollama", "openai", "openrouter", "perplexity", "vertexai", "xai", "agentcore", "daytona", "modal", "runloop", "codex-chatgpt-auth", "all-sandboxes", "all-providers"]
 
 [package.metadata.requires-dev]
 test = [
@@ -2567,6 +2571,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7c/4b/bd03518418ece4c13192a504449b58c28afee915dc4a6f4b02622458cb1b/langchain_classic-1.0.1.tar.gz", hash = "sha256:40a499684df36b005a1213735dc7f8dca8f5eb67978d6ec763e7a49780864fdc", size = 10516020, upload-time = "2025-12-23T22:55:22.615Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/83/0f/eab87f017d7fe28e8c11fff614f4cdbfae32baadb77d0f79e9f922af1df2/langchain_classic-1.0.1-py3-none-any.whl", hash = "sha256:131d83a02bb80044c68fedc1ab4ae885d5b8f8c2c742d8ab9e7534ad9cda8e80", size = 1040666, upload-time = "2025-12-23T22:55:21.025Z" },
+]
+
+[[package]]
+name = "langchain-codex-chatgpt-auth"
+version = "0.0.1"
+source = { editable = "../codex-chatgpt-auth" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+test = [
+    { name = "pytest", specifier = ">=7.3.0,<9.0.0" },
+    { name = "pytest-cov" },
+    { name = "pytest-timeout", specifier = ">=2.3.1,<3.0.0" },
+    { name = "ruff", specifier = ">=0.13.1,<0.16.0" },
+    { name = "ty", specifier = ">=0.0.1,<1.0.0" },
 ]
 
 [[package]]

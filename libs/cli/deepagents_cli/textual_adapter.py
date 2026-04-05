@@ -880,6 +880,39 @@ async def execute_task_textual(
 
                             tool_call_buffers.pop(buffer_key, None)
 
+                        elif (
+                            block_type == "web_search_call"
+                            or (
+                                block_type == "server_tool_call"
+                                and block.get("name") == "web_search"
+                            )
+                        ):
+                            ws_id = block.get("id", "")
+                            if ws_id and ws_id not in displayed_tool_ids:
+                                displayed_tool_ids.add(ws_id)
+                                # server_tool_call puts queries in args;
+                                # web_search_call puts them in action.
+                                args = block.get("args") or {}
+                                action = block.get("action") or args
+                                query = action.get("query", "")
+                                if query:
+                                    # Hide spinner before showing search
+                                    if adapter._set_spinner:
+                                        await adapter._set_spinner(None)
+                                    tool_msg = ToolCallMessage(
+                                        "web_search", {"query": query}
+                                    )
+                                    await adapter._mount_message(tool_msg)
+                                    # Mark as completed immediately
+                                    # (search already happened server-side)
+                                    queries = action.get("queries", [query])
+                                    output = "\n".join(
+                                        f"  \u2022 {q}" for q in queries
+                                    )
+                                    tool_msg.set_success(
+                                        f"Searched:\n{output}"
+                                    )
+
                     if getattr(message, "chunk_position", None) == "last":
                         pending_text = pending_text_by_namespace.get(ns_key, "")
                         if pending_text:

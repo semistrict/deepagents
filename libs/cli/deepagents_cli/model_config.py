@@ -539,6 +539,19 @@ def get_available_models() -> dict[str, list[str]]:
                 if model not in existing:
                     available[provider_name].append(model)
 
+    # Inject ChatGPT models from langchain-codex-chatgpt-auth if available.
+    try:
+        from langchain_codex_chatgpt_auth import get_chatgpt_models  # noqa: PLC0415
+    except ImportError:
+        pass
+    else:
+        chatgpt_models = get_chatgpt_models()
+        if chatgpt_models:
+            existing = set(available.get("openai", []))
+            extra = [m for m in chatgpt_models if m not in existing]
+            if extra:
+                available.setdefault("openai", []).extend(extra)
+
     _available_models_cache = available
     return available
 
@@ -743,7 +756,21 @@ def has_provider_credentials(provider: str) -> bool | None:
     # Fall back to hardcoded well-known providers.
     env_var = PROVIDER_API_KEY_ENV.get(provider)
     if env_var:
-        return bool(resolve_env_var(env_var))
+        if resolve_env_var(env_var):
+            return True
+
+    # For OpenAI: check ChatGPT OAuth credentials via langchain-codex-chatgpt-auth.
+    if provider == "openai":
+        try:
+            from langchain_codex_chatgpt_auth import get_chatgpt_credentials  # noqa: PLC0415
+        except ImportError:
+            pass
+        else:
+            if get_chatgpt_credentials() is not None:
+                return True
+
+    if env_var:
+        return False
 
     # Provider not found in config or hardcoded map — credential status is
     # unknown. The provider itself will report auth failures at

@@ -12,7 +12,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from enum import StrEnum
-from importlib.metadata import PackageNotFoundError, distribution
+from importlib.metadata import PackageNotFoundError, distribution, version as pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse
@@ -1843,12 +1843,79 @@ def _get_default_model_spec() -> str:
     if s.has_nvidia:
         return "nvidia:nvidia/nemotron-3-super-120b-a12b"
 
+    # Fall back to ChatGPT OAuth credentials via langchain-codex-auth
+    # (optional dependency, requires `codex login`).
+    if _has_codex_chatgpt_credentials():
+        return "openai:gpt-5.4"
+
     msg = (
         "No credentials configured. Please set one of: "
         "ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, "
         "GOOGLE_CLOUD_PROJECT, or NVIDIA_API_KEY"
     )
     raise ModelConfigError(msg)
+
+
+def _has_codex_chatgpt_credentials() -> bool:
+    """Check if ChatGPT OAuth credentials are available via ``langchain-codex-auth``."""
+    try:
+        from langchain_codex_chatgpt_auth import get_chatgpt_credentials  # noqa: PLC0415
+    except ImportError:
+        return False
+    return get_chatgpt_credentials() is not None
+
+
+def _wrap_chatgpt_model(model: BaseChatModel) -> BaseChatModel:
+    """Replace model with a ChatGPT-compatible variant that strips reasoning.
+
+    The ChatGPT backend with ``store=false`` cannot look up reasoning item
+    IDs from previous responses. This creates a new model instance of a
+    subclass that strips reasoning content blocks before each call.
+
+    Args:
+        model: The ChatOpenAI model to replace.
+
+    Returns:
+        New model instance with reasoning stripping.
+    """
+    from langchain_openai import ChatOpenAI  # noqa: PLC0415
+
+    from deepagents_cli._chatgpt_model import ChatGPTOpenAI  # noqa: PLC0415
+
+    if not isinstance(model, ChatOpenAI):
+        return model
+
+    # Reconstruct with the same config but as our subclass.
+    return ChatGPTOpenAI(**dict(model))  # type: ignore[arg-type]
+
+
+_CHATGPT_AUTH_MARKER = "_chatgpt_auth"
+"""Internal marker key set in kwargs when ChatGPT credentials are applied.
+
+Used by ``create_model`` to wrap the model with reasoning-stripping logic.
+"""
+
+
+def _apply_codex_chatgpt_kwargs(result: dict[str, Any]) -> None:
+    """Inject ChatGPT OAuth credentials into OpenAI provider kwargs.
+
+    Called when the ``openai`` provider has no API key and
+    ``langchain-codex-auth`` is installed with valid credentials.
+    No-op if the package is not installed.
+
+    Args:
+        result: Mutable kwargs dict to update in place.
+    """
+    try:
+        from langchain_codex_chatgpt_auth import get_openai_kwargs  # noqa: PLC0415
+    except ImportError:
+        return
+
+    kwargs = get_openai_kwargs()
+    if kwargs:
+        result.update(kwargs)
+        result[_CHATGPT_AUTH_MARKER] = True
+        logger.debug("Using ChatGPT credentials from Codex auth.json")
 
 
 _OPENROUTER_APP_URL = "https://pypi.org/project/deepagents-cli/"
@@ -1894,6 +1961,38 @@ def _apply_openrouter_defaults(kwargs: dict[str, Any]) -> None:
     kwargs.setdefault("app_categories", _OPENROUTER_APP_CATEGORIES)
 
 
+_OPENROUTER_MIN_VERSION = "0.2.0"
+"""Minimum required version of ``langchain-openrouter``.
+
+Mirrors the constant in ``deepagents._models`` but avoids importing the SDK
+package (which triggers heavy top-level imports and can deadlock inside
+Textual workers).
+"""
+
+
+def _check_openrouter_version() -> None:
+    """Raise if the installed ``langchain-openrouter`` is below the minimum.
+
+    Skipped if the package is not installed at all.
+
+    Raises:
+        ImportError: If the installed version is too old.
+    """
+    from packaging.version import Version
+
+    try:
+        installed = pkg_version("langchain-openrouter")
+    except PackageNotFoundError:
+        return
+    if Version(installed) < Version(_OPENROUTER_MIN_VERSION):
+        msg = (
+            f"deepagents requires langchain-openrouter>={_OPENROUTER_MIN_VERSION}, "
+            f"but {installed} is installed. "
+            f"Run: pip install 'langchain-openrouter>={_OPENROUTER_MIN_VERSION}'"
+        )
+        raise ImportError(msg)
+
+
 def _get_provider_kwargs(
     provider: str, *, model_name: str | None = None
 ) -> dict[str, Any]:
@@ -1936,10 +2035,13 @@ def _get_provider_kwargs(
             result["api_key"] = api_key
 
     if provider == "openrouter":
-        from deepagents._models import check_openrouter_version  # noqa: PLC2701
-
-        check_openrouter_version()
+        _check_openrouter_version()
         _apply_openrouter_defaults(result)
+
+    # For OpenAI: if no API key was resolved, try ChatGPT OAuth credentials
+    # from Codex's auth.json (requires `codex login` + langchain-codex-auth).
+    if provider == "openai" and "api_key" not in result:
+        _apply_codex_chatgpt_kwargs(result)
 
     return result
 
@@ -2231,6 +2333,9 @@ def create_model(
     if extra_kwargs:
         kwargs.update(extra_kwargs)
 
+    # Pop the ChatGPT auth marker before passing kwargs to the model.
+    is_chatgpt_auth = kwargs.pop(_CHATGPT_AUTH_MARKER, False)
+
     # Check if this provider uses a custom BaseChatModel class
     config = ModelConfig.load()
     class_path = config.get_class_path(provider) if provider else None
@@ -2239,6 +2344,12 @@ def create_model(
         model = _create_model_from_class(class_path, model_name, provider, kwargs)
     else:
         model = _create_model_via_init(model_name, provider, kwargs)
+
+    # Wrap model to strip reasoning items from conversation history.
+    # The ChatGPT backend with store=false cannot look up reasoning IDs
+    # from previous responses.
+    if is_chatgpt_auth:
+        model = _wrap_chatgpt_model(model)
 
     resolved_provider = provider or getattr(model, "_model_provider", provider)
 
