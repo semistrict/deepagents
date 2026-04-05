@@ -501,7 +501,17 @@ async def execute_task_textual(
     user_msg: dict[str, Any] = {"role": "user", "content": message_content}
     if message_kwargs:
         user_msg.update(message_kwargs)
-    stream_input: dict | Command = {"messages": [user_msg]}
+    messages: list[dict[str, Any]] = [user_msg]
+
+    # Inject a one-shot system message queued by auto-resume (or similar).
+    # Prefixed with [SYSTEM] so _convert_messages_to_data filters it from
+    # the chat display.
+    pending = getattr(session_state, "pending_system_message", None)
+    if pending:
+        messages.insert(0, {"role": "user", "content": f"[SYSTEM] {pending}"})
+        session_state.pending_system_message = None
+
+    stream_input: dict | Command = {"messages": messages}
 
     # Track summarization lifecycle so spinner status and notification stay in sync.
     summarization_in_progress = False

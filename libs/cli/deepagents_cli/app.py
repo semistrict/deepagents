@@ -402,6 +402,8 @@ class TextualSessionState:
         """
         self.auto_approve = auto_approve
         self.thread_id = thread_id or _new_thread_id()
+        self.pending_system_message: str | None = None
+        """One-shot system message injected with the next user turn, then cleared."""
 
     def reset_thread(self) -> str:
         """Reset to a new thread.
@@ -591,6 +593,8 @@ class DeepAgentsApp(App):
         """
 
         self._resume_thread_intent = resume_thread
+
+        self._pending_autoresume_system_msg: str | None = None
 
         self._initial_prompt = initial_prompt
 
@@ -1137,7 +1141,9 @@ class DeepAgentsApp(App):
         thread on any DB error.
         """
         from deepagents_cli.sessions import (
+            find_nearest_thread,
             find_similar_threads,
+            fork_thread,
             generate_thread_id,
             get_most_recent,
             get_thread_agent,
@@ -1157,7 +1163,43 @@ class DeepAgentsApp(App):
         default_agent = "agent"
 
         try:
-            if resume == "__MOST_RECENT__":
+            if resume == "__AUTO_RESUME__":
+                nearest = await find_nearest_thread(self._cwd)
+                if nearest:
+                    new_id = await fork_thread(nearest["thread_id"])
+                    if new_id:
+                        self._lc_thread_id = new_id
+                        agent_name = nearest.get("agent_name")
+                        if agent_name:
+                            self._assistant_id = agent_name
+                            if self._server_kwargs:
+                                self._server_kwargs["assistant_id"] = agent_name
+                        from deepagents_cli.sessions import format_path
+
+                        old_display = format_path(nearest.get("cwd"))
+                        new_display = format_path(self._cwd)
+                        self.notify(
+                            f"Auto-resumed from {old_display}",
+                            markup=False,
+                        )
+                        # Queue a system message so the agent knows
+                        # the session context has changed.  Stored on the
+                        # app because _session_state may not be initialised
+                        # yet (concurrent worker).  Transferred in
+                        # _run_agent_task before the first turn.
+                        self._pending_autoresume_system_msg = (
+                            f"This session was auto-resumed from a prior "
+                            f"conversation in {old_display}. "
+                            f"The current working directory is now "
+                            f"{new_display}. Treat this as a new session "
+                            f"but carry forward any useful context from "
+                            f"the prior conversation."
+                        )
+                    else:
+                        self._lc_thread_id = generate_thread_id()
+                else:
+                    self._lc_thread_id = generate_thread_id()
+            elif resume == "__MOST_RECENT__":
                 agent_filter = (
                     self._assistant_id if self._assistant_id != default_agent else None
                 )
@@ -3267,6 +3309,13 @@ class DeepAgentsApp(App):
         if self._ui_adapter is None:
             return
         from deepagents_cli.textual_adapter import execute_task_textual
+
+        # Drain any one-shot system message queued by auto-resume.
+        if self._pending_autoresume_system_msg and self._session_state:
+            self._session_state.pending_system_message = (
+                self._pending_autoresume_system_msg
+            )
+            self._pending_autoresume_system_msg = None
 
         # Create the stats object up-front and store on the app so
         # exit() can merge it synchronously if the worker is cancelled

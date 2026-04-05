@@ -14,6 +14,7 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from deepagents_cli import sessions
 from deepagents_cli.app import TextualSessionState
+from deepagents_cli.main import _experiment_enabled
 from deepagents_cli.sessions import get_thread_limit
 
 if TYPE_CHECKING:
@@ -1730,3 +1731,415 @@ class TestBatchCheckpointSummaries:
         finally:
             sessions._message_count_cache.clear()
             sessions._initial_prompt_cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# find_nearest_thread tests
+# ---------------------------------------------------------------------------
+
+
+def _make_db_with_threads(
+    db_path: Path,
+    rows: list[tuple[str, str, str, str]],
+) -> None:
+    """Create a minimal DB with checkpoint rows.
+
+    Each *row* is ``(thread_id, agent_name, updated_at, cwd)``.
+    """
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS checkpoints (
+            thread_id TEXT NOT NULL,
+            checkpoint_ns TEXT NOT NULL DEFAULT '',
+            checkpoint_id TEXT NOT NULL,
+            parent_checkpoint_id TEXT,
+            type TEXT,
+            checkpoint BLOB,
+            metadata BLOB,
+            PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS writes (
+            thread_id TEXT NOT NULL,
+            checkpoint_ns TEXT NOT NULL DEFAULT '',
+            checkpoint_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            idx INTEGER NOT NULL,
+            channel TEXT NOT NULL,
+            type TEXT,
+            value BLOB,
+            PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+        )
+    """)
+    for tid, agent, updated, cwd in rows:
+        meta = json.dumps(
+            {"agent_name": agent, "updated_at": updated, "cwd": cwd}
+        )
+        conn.execute(
+            "INSERT INTO checkpoints "
+            "(thread_id, checkpoint_ns, checkpoint_id, metadata) "
+            "VALUES (?, '', ?, ?)",
+            (tid, f"cp_{tid}", meta),
+        )
+    conn.commit()
+    conn.close()
+
+
+class TestFindNearestThread:
+    """Tests for find_nearest_thread."""
+
+    def test_exact_cwd_match(self, tmp_path: Path) -> None:
+        """Returns thread whose cwd matches the query exactly."""
+        db = tmp_path / "sessions.db"
+        cwd = str(tmp_path / "project")
+        _make_db_with_threads(db, [("t1", "agent", "2025-01-01T00:00:00+00:00", cwd)])
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            result = asyncio.run(
+                sessions.find_nearest_thread(cwd, home=str(tmp_path))
+            )
+
+        assert result is not None
+        assert result["thread_id"] == "t1"
+
+    def test_parent_dir_match(self, tmp_path: Path) -> None:
+        """Falls back to a thread at a parent directory."""
+        db = tmp_path / "sessions.db"
+        parent_cwd = str(tmp_path / "project")
+        child_cwd = str(tmp_path / "project" / "subdir")
+        Path(child_cwd).mkdir(parents=True, exist_ok=True)
+        _make_db_with_threads(
+            db, [("t1", "agent", "2025-01-01T00:00:00+00:00", parent_cwd)]
+        )
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            result = asyncio.run(
+                sessions.find_nearest_thread(child_cwd, home=str(tmp_path))
+            )
+
+        assert result is not None
+        assert result["thread_id"] == "t1"
+
+    def test_skips_to_grandparent(self, tmp_path: Path) -> None:
+        """Skips parent when only grandparent has a thread."""
+        db = tmp_path / "sessions.db"
+        grandparent = str(tmp_path)
+        deep_cwd = str(tmp_path / "a" / "b")
+        Path(deep_cwd).mkdir(parents=True, exist_ok=True)
+        _make_db_with_threads(
+            db, [("t1", "agent", "2025-01-01T00:00:00+00:00", grandparent)]
+        )
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            result = asyncio.run(
+                sessions.find_nearest_thread(deep_cwd, home=str(tmp_path))
+            )
+
+        assert result is not None
+        assert result["thread_id"] == "t1"
+
+    def test_prefers_deeper_thread(self, tmp_path: Path) -> None:
+        """Deeper (closer to CWD) thread wins over shallower one."""
+        db = tmp_path / "sessions.db"
+        parent = str(tmp_path / "project")
+        child = str(tmp_path / "project" / "sub")
+        Path(child).mkdir(parents=True, exist_ok=True)
+        _make_db_with_threads(
+            db,
+            [
+                ("t_shallow", "agent", "2025-06-01T00:00:00+00:00", parent),
+                ("t_deep", "agent", "2025-01-01T00:00:00+00:00", child),
+            ],
+        )
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            result = asyncio.run(
+                sessions.find_nearest_thread(child, home=str(tmp_path))
+            )
+
+        assert result is not None
+        assert result["thread_id"] == "t_deep"
+
+    def test_same_dir_most_recent_wins(self, tmp_path: Path) -> None:
+        """Multiple threads at same depth: most recent updated_at wins."""
+        db = tmp_path / "sessions.db"
+        cwd = str(tmp_path / "project")
+        _make_db_with_threads(
+            db,
+            [
+                ("t_old", "agent", "2025-01-01T00:00:00+00:00", cwd),
+                ("t_new", "agent", "2025-06-01T00:00:00+00:00", cwd),
+            ],
+        )
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            result = asyncio.run(
+                sessions.find_nearest_thread(cwd, home=str(tmp_path))
+            )
+
+        assert result is not None
+        assert result["thread_id"] == "t_new"
+
+    def test_stops_at_home(self, tmp_path: Path) -> None:
+        """Does not look above home directory."""
+        db = tmp_path / "sessions.db"
+        home = tmp_path / "home"
+        above_home = str(tmp_path)
+        cwd = str(home / "project")
+        Path(cwd).mkdir(parents=True, exist_ok=True)
+        _make_db_with_threads(
+            db, [("t1", "agent", "2025-01-01T00:00:00+00:00", above_home)]
+        )
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            result = asyncio.run(
+                sessions.find_nearest_thread(cwd, home=str(home))
+            )
+
+        assert result is None
+
+    def test_cwd_outside_home_returns_none(self, tmp_path: Path) -> None:
+        """Returns None when CWD is not under home."""
+        db = tmp_path / "sessions.db"
+        home = tmp_path / "home"
+        outside = tmp_path / "other"
+        home.mkdir()
+        outside.mkdir()
+        _make_db_with_threads(
+            db, [("t1", "agent", "2025-01-01T00:00:00+00:00", str(outside))]
+        )
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            result = asyncio.run(
+                sessions.find_nearest_thread(str(outside), home=str(home))
+            )
+
+        assert result is None
+
+    def test_empty_db_returns_none(self, tmp_path: Path) -> None:
+        """Returns None when database has no checkpoints table."""
+        db = tmp_path / "sessions.db"
+        conn = sqlite3.connect(str(db))
+        conn.close()
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            result = asyncio.run(
+                sessions.find_nearest_thread(
+                    str(tmp_path), home=str(tmp_path)
+                )
+            )
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# fork_thread tests
+# ---------------------------------------------------------------------------
+
+
+class TestForkThread:
+    """Tests for fork_thread."""
+
+    def _make_full_db(
+        self,
+        db_path: Path,
+        thread_id: str = "src-thread",
+        agent_name: str = "agent",
+        cwd: str = "/home/user/project",
+    ) -> None:
+        """Create a DB with a checkpoint and writes row for *thread_id*."""
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                parent_checkpoint_id TEXT,
+                type TEXT,
+                checkpoint BLOB,
+                metadata BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS writes (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                idx INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                type TEXT,
+                value BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+            )
+        """)
+        meta = json.dumps(
+            {
+                "agent_name": agent_name,
+                "updated_at": "2025-01-01T00:00:00+00:00",
+                "cwd": cwd,
+            }
+        )
+        conn.execute(
+            "INSERT INTO checkpoints "
+            "(thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, "
+            "type, checkpoint, metadata) "
+            "VALUES (?, '', 'cp_latest', 'cp_prev', 'json', X'DEADBEEF', ?)",
+            (thread_id, meta),
+        )
+        conn.execute(
+            "INSERT INTO writes "
+            "(thread_id, checkpoint_ns, checkpoint_id, task_id, idx, "
+            "channel, type, value) "
+            "VALUES (?, '', 'cp_latest', 'task1', 0, 'messages', 'json', X'CAFE')",
+            (thread_id,),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_copies_checkpoint_with_new_id(self, tmp_path: Path) -> None:
+        """Fork creates a new checkpoint row with a fresh thread ID."""
+        db = tmp_path / "sessions.db"
+        self._make_full_db(db)
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            new_id = asyncio.run(sessions.fork_thread("src-thread"))
+
+        assert new_id is not None
+        assert new_id != "src-thread"
+
+        # Verify the new row exists.
+        conn = sqlite3.connect(str(db))
+        row = conn.execute(
+            "SELECT checkpoint_id, type, checkpoint FROM checkpoints WHERE thread_id = ?",
+            (new_id,),
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == "cp_latest"
+        assert row[1] == "json"
+        assert row[2] == b"\xDE\xAD\xBE\xEF"
+
+    def test_source_thread_unchanged(self, tmp_path: Path) -> None:
+        """Source thread's checkpoint is not modified by the fork."""
+        db = tmp_path / "sessions.db"
+        self._make_full_db(db)
+
+        conn = sqlite3.connect(str(db))
+        before = conn.execute(
+            "SELECT metadata FROM checkpoints WHERE thread_id = 'src-thread'"
+        ).fetchone()[0]
+        conn.close()
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            asyncio.run(sessions.fork_thread("src-thread"))
+
+        conn = sqlite3.connect(str(db))
+        after = conn.execute(
+            "SELECT metadata FROM checkpoints WHERE thread_id = 'src-thread'"
+        ).fetchone()[0]
+        conn.close()
+        assert before == after
+
+    def test_metadata_contains_forked_from(self, tmp_path: Path) -> None:
+        """Forked checkpoint metadata includes ``forked_from``."""
+        db = tmp_path / "sessions.db"
+        self._make_full_db(db)
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            new_id = asyncio.run(sessions.fork_thread("src-thread"))
+
+        assert new_id is not None
+        conn = sqlite3.connect(str(db))
+        raw = conn.execute(
+            "SELECT metadata FROM checkpoints WHERE thread_id = ?",
+            (new_id,),
+        ).fetchone()[0]
+        conn.close()
+        meta = json.loads(raw)
+        assert meta["forked_from"] == "src-thread"
+        assert "updated_at" in meta
+
+    def test_writes_rows_copied(self, tmp_path: Path) -> None:
+        """Writes rows for the checkpoint are duplicated to the new thread."""
+        db = tmp_path / "sessions.db"
+        self._make_full_db(db)
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            new_id = asyncio.run(sessions.fork_thread("src-thread"))
+
+        assert new_id is not None
+        conn = sqlite3.connect(str(db))
+        rows = conn.execute(
+            "SELECT channel, type, value FROM writes WHERE thread_id = ?",
+            (new_id,),
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 1
+        assert rows[0][0] == "messages"
+        assert rows[0][2] == b"\xCA\xFE"
+
+    def test_nonexistent_source_returns_none(self, tmp_path: Path) -> None:
+        """Returns None when source thread has no checkpoints."""
+        db = tmp_path / "sessions.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("""
+            CREATE TABLE checkpoints (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                parent_checkpoint_id TEXT,
+                type TEXT,
+                checkpoint BLOB,
+                metadata BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        with patch.object(sessions, "get_db_path", return_value=db):
+            result = asyncio.run(sessions.fork_thread("no-such-thread"))
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _experiment_enabled tests
+# ---------------------------------------------------------------------------
+
+
+class TestExperimentEnabled:
+    """Tests for _experiment_enabled helper."""
+
+    def test_enabled_single(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "autoresume")
+        assert _experiment_enabled("autoresume") is True
+
+    def test_enabled_comma_separated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "autoresume,other")
+        assert _experiment_enabled("autoresume") is True
+        assert _experiment_enabled("other") is True
+
+    def test_disabled_when_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "other")
+        assert _experiment_enabled("autoresume") is False
+
+    def test_empty_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "")
+        assert _experiment_enabled("autoresume") is False
+
+    def test_unset_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DEEP_AGENTS_EXPERIMENTS", raising=False)
+        assert _experiment_enabled("autoresume") is False
+
+    def test_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "AutoResume")
+        assert _experiment_enabled("autoresume") is True
+
+    def test_whitespace_handling(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEP_AGENTS_EXPERIMENTS", "  autoresume , other  ")
+        assert _experiment_enabled("autoresume") is True
+        assert _experiment_enabled("other") is True

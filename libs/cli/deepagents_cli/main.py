@@ -636,6 +636,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _experiment_enabled(name: str) -> bool:
+    """Check whether an experiment flag is active.
+
+    Reads from ``DEEP_AGENTS_EXPERIMENTS`` (comma-separated, case-insensitive).
+
+    Args:
+        name: Experiment name to look up.
+
+    Returns:
+        ``True`` when *name* appears in the env-var value.
+    """
+    raw = os.environ.get("DEEP_AGENTS_EXPERIMENTS", "")
+    return name in {s.strip().lower() for s in raw.split(",") if s.strip()}
+
+
 async def run_textual_cli_async(
     assistant_id: str,
     *,
@@ -1524,6 +1539,12 @@ def cli_main() -> None:
             # DB calls, pass the raw resume request to the TUI and let it
             # resolve asynchronously during startup.
             resume_thread = args.resume_thread  # "__MOST_RECENT__", "<id>", or None
+
+            # Auto-resume: when no explicit -r and the experiment is active,
+            # signal the TUI to find and fork the nearest prior session.
+            if resume_thread is None and _experiment_enabled("autoresume"):
+                resume_thread = "__AUTO_RESUME__"
+
             thread_id = None if resume_thread else generate_thread_id()
 
             # Validate sandbox provider deps before spawning server subprocess

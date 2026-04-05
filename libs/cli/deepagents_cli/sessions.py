@@ -6,7 +6,7 @@ import asyncio
 import logging
 import sqlite3
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, cast
 
@@ -896,6 +896,194 @@ def _coerce_prompt_text(content: object) -> str | None:
     if content is None:
         return None
     return str(content)
+
+
+async def find_nearest_thread(
+    cwd: str | Path,
+    home: str | Path | None = None,
+) -> ThreadInfo | None:
+    """Find the most recent thread whose CWD is nearest to *cwd*.
+
+    Walks from *cwd* up to *home* (inclusive) and returns the thread whose
+    ``cwd`` metadata is deepest (closest to *cwd*).  Ties are broken by
+    ``updated_at DESC``.
+
+    Args:
+        cwd: Starting directory to search from.
+        home: Upper boundary (inclusive).  Defaults to ``Path.home()``.
+
+    Returns:
+        The best-matching ``ThreadInfo``, or ``None`` when no thread is
+        found or *cwd* is not under *home*.
+    """
+    cwd_path = Path(cwd).resolve()
+    home_path = (Path(home) if home else Path.home()).resolve()
+
+    # CWD must be equal to or under home.
+    try:
+        cwd_path.relative_to(home_path)
+    except ValueError:
+        return None
+
+    # Build candidate directories from CWD up to home (inclusive).
+    candidates: list[str] = []
+    current = cwd_path
+    while True:
+        candidates.append(str(current))
+        if current == home_path:
+            break
+        parent = current.parent
+        if parent == current:
+            break  # filesystem root — shouldn't happen since cwd is under home
+        current = parent
+
+    async with _connect() as conn:
+        if not await _table_exists(conn, "checkpoints"):
+            return None
+
+        placeholders = ",".join("?" * len(candidates))
+        query = f"""
+            SELECT thread_id,
+                   json_extract(metadata, '$.agent_name') as agent_name,
+                   MAX(json_extract(metadata, '$.updated_at')) as updated_at,
+                   MAX(checkpoint_id) as latest_checkpoint_id,
+                   MIN(json_extract(metadata, '$.updated_at')) as created_at,
+                   MAX(json_extract(metadata, '$.git_branch')) as git_branch,
+                   MAX(json_extract(metadata, '$.cwd')) as cwd
+            FROM checkpoints
+            WHERE json_extract(metadata, '$.cwd') IN ({placeholders})
+            GROUP BY thread_id
+            ORDER BY updated_at DESC
+        """  # noqa: S608  # placeholders built from len(candidates); user values use ? params
+        async with conn.execute(query, candidates) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        return None
+
+    # Build a depth map: deeper directories get higher priority.
+    depth_by_dir = {d: i for i, d in enumerate(reversed(candidates))}
+
+    best: ThreadInfo | None = None
+    best_depth = -1
+    for r in rows:
+        thread_cwd = r[6]
+        depth = depth_by_dir.get(thread_cwd, -1)
+        if depth > best_depth:
+            best_depth = depth
+            best = ThreadInfo(
+                thread_id=r[0],
+                agent_name=r[1],
+                updated_at=r[2],
+                latest_checkpoint_id=r[3],
+                created_at=r[4],
+                git_branch=r[5],
+                cwd=r[6],
+            )
+        elif depth == best_depth and best is not None:
+            # Same depth — rows are already ordered by updated_at DESC,
+            # so the first one seen at this depth wins.  Nothing to do.
+            pass
+
+    return best
+
+
+async def fork_thread(source_thread_id: str) -> str | None:
+    """Fork a thread by copying its latest checkpoint to a new thread ID.
+
+    The new checkpoint's metadata is updated with a ``forked_from`` key
+    pointing back to *source_thread_id* and a refreshed ``updated_at``.
+    Associated ``writes`` rows for the checkpoint are also copied.
+
+    Args:
+        source_thread_id: Thread ID to fork from.
+
+    Returns:
+        The newly created thread ID, or ``None`` if the source thread
+        has no checkpoints.
+    """
+    import json as _json
+
+    async with _connect() as conn:
+        if not await _table_exists(conn, "checkpoints"):
+            return None
+
+        # Fetch the latest checkpoint row for the source thread.
+        query = """
+            SELECT thread_id, checkpoint_ns, checkpoint_id,
+                   parent_checkpoint_id, type, checkpoint, metadata
+            FROM checkpoints
+            WHERE thread_id = ?
+            ORDER BY checkpoint_id DESC
+            LIMIT 1
+        """
+        async with conn.execute(query, (source_thread_id,)) as cursor:
+            row = await cursor.fetchone()
+
+        if row is None:
+            return None
+
+        (
+            _src_tid,
+            checkpoint_ns,
+            checkpoint_id,
+            parent_checkpoint_id,
+            cp_type,
+            cp_blob,
+            metadata_raw,
+        ) = row
+
+        new_thread_id = generate_thread_id()
+
+        # Update metadata with forked_from and fresh updated_at.
+        try:
+            meta = _json.loads(metadata_raw) if metadata_raw else {}
+        except (_json.JSONDecodeError, TypeError):
+            meta = {}
+        meta["forked_from"] = source_thread_id
+        meta["updated_at"] = datetime.now(tz=UTC).isoformat()
+        new_metadata = _json.dumps(meta)
+
+        await conn.execute(
+            "INSERT INTO checkpoints "
+            "(thread_id, checkpoint_ns, checkpoint_id, "
+            "parent_checkpoint_id, type, checkpoint, metadata) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                new_thread_id,
+                checkpoint_ns,
+                checkpoint_id,
+                parent_checkpoint_id,
+                cp_type,
+                cp_blob,
+                new_metadata,
+            ),
+        )
+
+        # Copy associated writes rows if the writes table exists.
+        if await _table_exists(conn, "writes"):
+            writes_query = """
+                SELECT checkpoint_ns, checkpoint_id, task_id, idx,
+                       channel, type, value
+                FROM writes
+                WHERE thread_id = ? AND checkpoint_id = ?
+            """
+            async with conn.execute(
+                writes_query, (source_thread_id, checkpoint_id)
+            ) as cursor:
+                writes_rows = await cursor.fetchall()
+
+            for wr in writes_rows:
+                await conn.execute(
+                    "INSERT INTO writes "
+                    "(thread_id, checkpoint_ns, checkpoint_id, task_id, idx, "
+                    "channel, type, value) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (new_thread_id, *wr),
+                )
+
+        await conn.commit()
+        return new_thread_id
 
 
 async def get_most_recent(agent_name: str | None = None) -> str | None:
