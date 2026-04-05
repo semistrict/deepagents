@@ -1323,33 +1323,25 @@ class DeepAgentsApp(App):
         if self._session_state:
             self._session_state.thread_id = self._lc_thread_id
 
-    async def _fork_via_server(self, agent: Any, source: dict) -> None:
-        """Copy a thread via the server's ``/threads/<id>/copy`` endpoint.
+    async def _fork_via_db(self, source: dict) -> None:
+        """Fork a thread via direct SQLite checkpoint copy.
+
+        The in-memory LangGraph runtime loads checkpoints lazily from the
+        SQLite persister on first stream with ``durability='exit'``.
+        Writing the forked checkpoint directly to SQLite is therefore
+        sufficient — the runtime will pick it up on the first agent turn.
 
         Sets ``self._lc_thread_id`` to the new thread and shows the
         autofork toast + system message on success.  Falls back to a
         fresh thread on any error.
         """
-        from deepagents_cli.sessions import generate_thread_id
+        from deepagents_cli.sessions import fork_thread, generate_thread_id
 
         source_id = source["thread_id"]
         try:
-            graph = agent._get_graph()
-            client = graph._validate_client()
-            # Ensure the source thread is loaded into the in-memory runtime
-            # (it may have been created in a prior server session and only
-            # exists in the SQLite checkpointer).
-            try:
-                await client.threads.get(source_id)
-            except Exception:
-                # Thread not in runtime — create a stub so /copy has a target.
-                await client.threads.create(
-                    thread_id=source_id, if_exists="do_nothing"
-                )
-            resp = await client.http.post(f"/threads/{source_id}/copy", json={})
-            new_thread = resp.get("thread_id") if isinstance(resp, dict) else None
-            if new_thread:
-                self._lc_thread_id = new_thread
+            new_id = await fork_thread(source_id)
+            if new_id:
+                self._lc_thread_id = new_id
                 ctx = _format_autoresume_context(
                     old_cwd=source.get("cwd") or self._cwd,
                     new_cwd=self._cwd,
@@ -1358,10 +1350,10 @@ class DeepAgentsApp(App):
                 self.notify(ctx.toast, markup=False)
                 self._pending_autoresume_system_msg = ctx.system_message
             else:
-                logger.warning("Thread copy returned no thread_id: %s", resp)
+                logger.warning("fork_thread returned None for %s", source_id)
                 self._lc_thread_id = generate_thread_id()
         except Exception:
-            logger.exception("Failed to fork thread %s via server", source_id)
+            logger.exception("Failed to fork thread %s", source_id)
             self._lc_thread_id = generate_thread_id()
 
         if self._session_state:
@@ -1437,10 +1429,10 @@ class DeepAgentsApp(App):
                 exc_info=results[1],
             )
 
-        # Autofork: copy the source thread via the server's /copy API
-        # now that the server is running.
+        # Autofork: copy the source thread's checkpoint in SQLite.
+        # The runtime loads checkpoints lazily on first stream.
         if self._autofork_source is not None:
-            await self._fork_via_server(agent, self._autofork_source)
+            await self._fork_via_db(self._autofork_source)
             self._autofork_source = None
 
         self.post_message(
@@ -3739,7 +3731,14 @@ class DeepAgentsApp(App):
             return {}
 
         config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-        state = await self._agent.aget_state(config)
+        try:
+            state = await self._agent.aget_state(config)
+        except TypeError:
+            # RemoteGraph._create_state_snapshot crashes with
+            # "'NoneType' object is not subscriptable" when the runtime
+            # returns a thread with checkpoint=None (e.g. forked threads
+            # whose checkpoints only exist in the SQLite persister).
+            state = None
 
         values: dict[str, Any] = {}
         if state and state.values:
