@@ -75,6 +75,39 @@ check_imports: $(shell find deepagents_cli -name '*.py')
 	uv run --all-groups python ./scripts/check_imports.py $^
 
 ######################
+# BINARY BUILD
+######################
+
+BINARY_NAME ?= deepagents
+BINARY_EXTRAS ?= codex-chatgpt-auth,openrouter
+
+binary: ## Compile standalone binary with Nuitka (arm64 macOS)
+	uv sync --extra $(subst $(eval) ,--extra ,$(subst $(comma),$(eval) ,$(BINARY_EXTRAS)))
+	uv run nuitka \
+		--mode=onefile \
+		--output-filename=$(BINARY_NAME) \
+		--macos-target-arch=arm64 \
+		--include-package=deepagents_cli \
+		--include-package=deepagents \
+		--include-package=langchain_openai \
+		--include-package=langchain_anthropic \
+		--include-package=langchain_google_genai \
+		--include-package=langchain_openrouter \
+		--include-package=langchain_codex_chatgpt_auth \
+		--include-package=langchain \
+		--include-package=langgraph \
+		--include-package=textual \
+		--include-data-dir=deepagents_cli=deepagents_cli \
+		--include-package-data=textual \
+		--include-package-data=certifi \
+		--follow-imports \
+		--assume-yes-for-downloads \
+		deepagents_cli/__main__.py
+	@echo "Binary built: ./$(BINARY_NAME)"
+
+comma := ,
+
+######################
 # HELP
 ######################
 

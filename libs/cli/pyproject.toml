@@ -145,6 +145,7 @@ test = [
     "pytest-xdist>=3.8.0,<4.0.0",
     "responses>=0.25.0,<1.0.0",
     "twine>=6.0.0,<7.0.0",
+    "nuitka>=4.0.7",
 ]
 
 [tool.hatch.build.targets.wheel]
