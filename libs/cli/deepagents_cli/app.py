@@ -66,6 +66,43 @@ from deepagents_cli.widgets.welcome import WelcomeBanner
 logger = logging.getLogger(__name__)
 _monotonic = time.monotonic
 
+_error_logger: logging.Logger | None = None
+
+
+def _get_error_logger() -> logging.Logger:
+    """Return a logger that always writes to ``~/.deepagents/error.log``.
+
+    Lazily creates the file handler on first call so normal startup pays
+    no cost.  The log uses JSON-lines format for easy machine parsing.
+    """
+    global _error_logger  # noqa: PLW0603
+    if _error_logger is not None:
+        return _error_logger
+
+    _error_logger = logging.getLogger("deepagents_cli._errors")
+    _error_logger.setLevel(logging.ERROR)
+    _error_logger.propagate = False
+
+    try:
+        log_dir = Path.home() / ".deepagents"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(str(log_dir / "error.log"), mode="a")
+    except OSError:
+        # Can't write the file — return the logger without a handler;
+        # calls will be silently dropped.
+        return _error_logger
+
+    handler.setLevel(logging.ERROR)
+    handler.setFormatter(
+        logging.Formatter(
+            '{"ts":"%(asctime)s","logger":"%(name)s","level":"%(levelname)s",'
+            '"message":"%(message)s"}',
+            datefmt="%Y-%m-%dT%H:%M:%S%z",
+        )
+    )
+    _error_logger.addHandler(handler)
+    return _error_logger
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -3342,6 +3379,33 @@ class DeepAgentsApp(App):
             )
         except Exception as e:  # Resilient tool rendering
             logger.exception("Agent execution failed")
+
+            # Always persist the full traceback to ~/.deepagents/error.log
+            # so failures are diagnosable without DEEPAGENTS_CLI_DEBUG.
+            import traceback as _tb
+
+            err_detail = _tb.format_exc()
+            # Include HTTP response body when available (LangGraph SDK /
+            # httpx errors often carry it).
+            response_body = ""
+            if hasattr(e, "response"):
+                try:
+                    response_body = e.response.text  # type: ignore[union-attr]
+                except Exception:
+                    pass
+            if hasattr(e, "body"):
+                try:
+                    response_body = json.dumps(e.body)  # type: ignore[union-attr]
+                except Exception:
+                    pass
+            _get_error_logger().error(
+                "Agent execution failed | thread=%s | error=%s | response=%s | traceback:\n%s",
+                self._lc_thread_id,
+                repr(e),
+                response_body,
+                err_detail,
+            )
+
             # Ensure any in-flight tool calls don't remain stuck in "Running..."
             # when streaming aborts before tool results arrive.
             if self._ui_adapter:
