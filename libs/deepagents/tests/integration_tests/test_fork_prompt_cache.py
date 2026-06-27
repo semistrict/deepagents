@@ -22,6 +22,7 @@ pytestmark = pytest.mark.skipif(
 
 MODEL_ID = os.environ.get("DEEPAGENTS_OPENAI_PROMPT_CACHE_MODEL", "gpt-5.4-mini")
 SUBAGENT_COUNT = 10
+PAIR_COUNT = 18
 
 
 def _live_model() -> ChatOpenAI:
@@ -38,9 +39,30 @@ def _cacheable_prefix() -> str:
 
 
 SYSTEM_PROMPT = "Use the task tool calls requested by the scripted parent model."
-USER_PROMPT = "Delegate to the cache_probe subagent with the instruction: confirm the cache probe."
+USER_PROMPT = "Delegate to every cache probe subagent so each one can recover its assigned paired number from prior context."
 MIN_EXPECTED_CACHED_TOKENS = 4_096
 MIN_EXPECTED_CACHE_RATIO = 0.80
+PAIR_BY_KEY = {
+    "38472": "918263",
+    "75910": "284650",
+    "12638": "775491",
+    "90841": "336702",
+    "47205": "640119",
+    "63194": "502873",
+    "81527": "197346",
+    "29386": "854201",
+    "54072": "419638",
+    "68713": "730524",
+    "34958": "265917",
+    "71620": "948305",
+    "20549": "573816",
+    "89314": "681270",
+    "45826": "307945",
+    "97035": "126584",
+    "62108": "792463",
+    "13479": "845026",
+}
+PAIR_KEYS = list(PAIR_BY_KEY)
 
 
 class _Invokable(Protocol):
@@ -81,14 +103,25 @@ def _input_token_count(message: AIMessage) -> int:
 
 def _long_prior_conversation() -> list[BaseMessage]:
     messages: list[BaseMessage] = []
-    for idx in range(18):
+    for idx, key in enumerate(PAIR_KEYS):
+        value = PAIR_BY_KEY[key]
         messages.append(
             HumanMessage(
-                content=(f"Historical user turn {idx}: {_cacheable_prefix()} Remember this as shared context before any subagent is forked.")
+                content=(
+                    f"Historical user turn {idx}: {_cacheable_prefix()} "
+                    f"Record lookup pair KEY-{key} VALUE-{value}. "
+                    "Remember this as shared context before any subagent is forked."
+                )
             )
         )
         messages.append(
-            AIMessage(content=(f"Historical assistant turn {idx}: {_cacheable_prefix()} This response is part of the parent conversation prefix."))
+            AIMessage(
+                content=(
+                    f"Historical assistant turn {idx}: {_cacheable_prefix()} "
+                    f"I have stored lookup pair KEY-{key} VALUE-{value}. "
+                    "This response is part of the parent conversation prefix."
+                )
+            )
         )
     messages.append(HumanMessage(content=USER_PROMPT))
     return messages
@@ -129,12 +162,16 @@ def _subagent_name(idx: int) -> str:
     return f"cache_probe_{idx}"
 
 
+def _subagent_key(idx: int) -> str:
+    return PAIR_KEYS[idx]
+
+
 def _parallel_fork_tool_calls() -> list[dict[str, Any]]:
     return [
         {
             "name": "task",
             "args": {
-                "description": f"Confirm cache probe number {idx}.",
+                "description": (f"Find the paired VALUE for KEY-{_subagent_key(idx)} in the prior conversation. Respond with only the VALUE digits."),
                 "subagent_type": _subagent_name(idx),
             },
             "id": f"call-cache-probe-{idx}",
@@ -181,8 +218,12 @@ def test_forked_subagent_reports_openai_prompt_cache_reuse() -> None:
         subagents=[
             {
                 "name": _subagent_name(idx),
-                "description": f"Reports a short answer for live prompt-cache verification probe {idx}.",
-                "system_prompt": f"Reply with exactly: cache probe {idx} complete",
+                "description": f"Retrieves the paired value for live prompt-cache verification probe {idx}.",
+                "system_prompt": (
+                    f"You are cache probe {idx}. Your assigned lookup key is KEY-{_subagent_key(idx)}. "
+                    "Use the inherited prior conversation to find the matching VALUE. "
+                    "Return only the VALUE digits and no other text."
+                ),
                 "tools": [],
                 "middleware": [capture.middleware_for(_subagent_name(idx))],
                 "fork": True,
@@ -200,10 +241,15 @@ def test_forked_subagent_reports_openai_prompt_cache_reuse() -> None:
         if not messages:
             failures.append(f"{name}: no forked model response captured")
             continue
+        idx = int(name.rsplit("_", maxsplit=1)[1])
+        expected_value = PAIR_BY_KEY[_subagent_key(idx)]
         fork_response = max(messages, key=_cached_token_count)
+        response_text = fork_response.text
         cached = _cached_token_count(fork_response)
         input_tokens = _input_token_count(fork_response)
         ratio = cached / input_tokens if input_tokens else 0
+        if expected_value not in response_text:
+            failures.append(f"{name}: expected VALUE-{expected_value}, got {response_text!r}")
         if cached < MIN_EXPECTED_CACHED_TOKENS or ratio < MIN_EXPECTED_CACHE_RATIO:
             failures.append(f"{name}: input_tokens={input_tokens}, cached_tokens={cached}, ratio={ratio:.2%}")
 
