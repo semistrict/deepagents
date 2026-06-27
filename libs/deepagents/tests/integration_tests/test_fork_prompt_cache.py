@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(
     reason="Set DEEPAGENTS_RUN_LIVE_PROMPT_CACHE_TESTS=1 and OPENAI_API_KEY to run live prompt-cache tests.",
 )
 
-MODEL_ID = os.environ.get("DEEPAGENTS_OPENAI_PROMPT_CACHE_MODEL", "gpt-5.4")
+MODEL_ID = os.environ.get("DEEPAGENTS_OPENAI_PROMPT_CACHE_MODEL", "gpt-5.4-mini")
 SUBAGENT_COUNT = 10
 
 
