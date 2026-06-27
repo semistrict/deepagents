@@ -21,6 +21,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 MODEL_ID = os.environ.get("DEEPAGENTS_OPENAI_PROMPT_CACHE_MODEL", "gpt-5.4")
+SUBAGENT_COUNT = 10
 
 
 def _live_model() -> ChatOpenAI:
@@ -36,7 +37,7 @@ def _cacheable_prefix() -> str:
     return chunk * 8
 
 
-SYSTEM_PROMPT = "Always use the task tool exactly once. Select the cache_probe subagent and do not answer directly."
+SYSTEM_PROMPT = "Use the task tool calls requested by the scripted parent model."
 USER_PROMPT = "Delegate to the cache_probe subagent with the instruction: confirm the cache probe."
 MIN_EXPECTED_CACHED_TOKENS = 4_096
 MIN_EXPECTED_CACHE_RATIO = 0.80
@@ -94,8 +95,9 @@ def _long_prior_conversation() -> list[BaseMessage]:
 
 
 class _CaptureModelResponses(AgentMiddleware[Any, Any, Any]):
-    def __init__(self) -> None:
+    def __init__(self, *, name: str) -> None:
         super().__init__()
+        self.subagent_name = name
         self.messages: list[AIMessage] = []
 
     def wrap_model_call(
@@ -108,6 +110,60 @@ class _CaptureModelResponses(AgentMiddleware[Any, Any, Any]):
         return response
 
 
+class _CaptureBySubagent(AgentMiddleware[Any, Any, Any]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages_by_subagent: dict[str, list[AIMessage]] = {}
+
+    def middleware_for(self, name: str) -> _CaptureModelResponses:
+        middleware = _CaptureModelResponses(name=name)
+        self.messages_by_subagent[name] = middleware.messages
+        return middleware
+
+    def clear(self) -> None:
+        for messages in self.messages_by_subagent.values():
+            messages.clear()
+
+
+def _subagent_name(idx: int) -> str:
+    return f"cache_probe_{idx}"
+
+
+def _parallel_fork_tool_calls() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "task",
+            "args": {
+                "description": f"Confirm cache probe number {idx}.",
+                "subagent_type": _subagent_name(idx),
+            },
+            "id": f"call-cache-probe-{idx}",
+            "type": "tool_call",
+        }
+        for idx in range(SUBAGENT_COUNT)
+    ]
+
+
+class _ScriptParentTaskCalls(AgentMiddleware[Any, Any, Any]):
+    def __init__(self) -> None:
+        super().__init__()
+        self._remaining = [
+            AIMessage(content="", tool_calls=_parallel_fork_tool_calls()),
+            AIMessage(content="All probes complete."),
+            AIMessage(content="", tool_calls=_parallel_fork_tool_calls()),
+            AIMessage(content="All probes complete."),
+        ]
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], ModelResponse[Any]],
+    ) -> ModelResponse[Any]:
+        if self._remaining:
+            return ModelResponse(result=[self._remaining.pop(0)])
+        return handler(request)
+
+
 def _invoke_cache_probe(agent: _Invokable) -> None:
     agent.invoke(
         {"messages": _long_prior_conversation()},
@@ -116,32 +172,39 @@ def _invoke_cache_probe(agent: _Invokable) -> None:
 
 
 def test_forked_subagent_reports_openai_prompt_cache_reuse() -> None:
-    capture = _CaptureModelResponses()
+    capture = _CaptureBySubagent()
     agent = create_deep_agent(
         model=_live_model(),
         system_prompt=SYSTEM_PROMPT,
         checkpointer=MemorySaver(),
+        middleware=[_ScriptParentTaskCalls()],
         subagents=[
             {
-                "name": "cache_probe",
-                "description": "Reports a short answer for live prompt-cache verification.",
-                "system_prompt": "Reply with exactly: cache probe complete",
+                "name": _subagent_name(idx),
+                "description": f"Reports a short answer for live prompt-cache verification probe {idx}.",
+                "system_prompt": f"Reply with exactly: cache probe {idx} complete",
                 "tools": [],
-                "middleware": [capture],
+                "middleware": [capture.middleware_for(_subagent_name(idx))],
                 "fork": True,
             }
+            for idx in range(SUBAGENT_COUNT)
         ],
     )
 
     _invoke_cache_probe(agent)
-    capture.messages.clear()
+    capture.clear()
     _invoke_cache_probe(agent)
 
-    assert capture.messages, "Forked subagent model response was not captured; the parent may not have delegated."
-    fork_response = max(capture.messages, key=_cached_token_count)
-    cached = _cached_token_count(fork_response)
-    input_tokens = _input_token_count(fork_response)
-    ratio = cached / input_tokens if input_tokens else 0
-    msg = f"Expected substantial fork prompt-cache reuse; input_tokens={input_tokens}, cached_tokens={cached}, ratio={ratio:.2%}"
-    assert cached >= MIN_EXPECTED_CACHED_TOKENS, msg
-    assert ratio >= MIN_EXPECTED_CACHE_RATIO, msg
+    failures: list[str] = []
+    for name, messages in capture.messages_by_subagent.items():
+        if not messages:
+            failures.append(f"{name}: no forked model response captured")
+            continue
+        fork_response = max(messages, key=_cached_token_count)
+        cached = _cached_token_count(fork_response)
+        input_tokens = _input_token_count(fork_response)
+        ratio = cached / input_tokens if input_tokens else 0
+        if cached < MIN_EXPECTED_CACHED_TOKENS or ratio < MIN_EXPECTED_CACHE_RATIO:
+            failures.append(f"{name}: input_tokens={input_tokens}, cached_tokens={cached}, ratio={ratio:.2%}")
+
+    assert not failures, "Expected substantial fork prompt-cache reuse for every subagent:\n" + "\n".join(failures)
