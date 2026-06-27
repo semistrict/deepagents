@@ -51,6 +51,8 @@ from deepagents.middleware.subagents import (
     CompiledSubAgent,
     SubAgent,
     SubAgentMiddleware,
+    _build_fork_subagent_system_prompt,
+    prepare_forked_subagent_spec,
 )
 from deepagents.middleware.summarization import create_summarization_middleware
 from deepagents.profiles.harness.harness_profiles import (
@@ -614,6 +616,14 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
 
     backend = backend if backend is not None else StateBackend()
 
+    base_prompt = _apply_profile_prompt(_profile, BASE_AGENT_PROMPT)
+    if system_prompt is None:
+        final_system_prompt: str | SystemMessage = base_prompt
+    elif isinstance(system_prompt, SystemMessage):
+        final_system_prompt = SystemMessage(content_blocks=[*system_prompt.content_blocks, {"type": "text", "text": f"\n\n{base_prompt}"}])
+    else:
+        final_system_prompt = system_prompt + "\n\n" + base_prompt
+
     # Process caller-supplied subagents first so the decision of whether to
     # auto-add the default general-purpose subagent can factor in an explicit
     # override, and so its middleware stack (including any factory-based
@@ -627,10 +637,17 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
             continue
         if "runnable" in spec:
             # CompiledSubAgent - use as-is
+            if spec.get("fork"):
+                msg = f"CompiledSubAgent '{spec['name']}' cannot set fork=True. Compiled subagents own their system prompt and graph."
+                raise ValueError(msg)
             inline_subagents.append(spec)
         else:
             # SubAgent - fill in defaults and prepend base middleware
-            raw_subagent_model = spec.get("model", model)
+            is_fork = bool(spec.get("fork", False))
+            if is_fork and "model" in spec:
+                msg = f"Forked subagent '{spec['name']}' cannot declare a model. Forked subagents always inherit the parent agent's model."
+                raise ValueError(msg)
+            raw_subagent_model = model if is_fork else spec.get("model", model)
             subagent_model = resolve_model(raw_subagent_model)
 
             _subagent_spec = raw_subagent_model if isinstance(raw_subagent_model, str) else None
@@ -704,6 +721,8 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
                 "middleware": subagent_middleware,
             }
             processed_spec["system_prompt"] = _apply_profile_prompt(_subagent_profile, spec["system_prompt"])
+            if is_fork:
+                processed_spec["fork"] = True
             if subagent_interrupt_on is not None:
                 processed_spec["interrupt_on"] = subagent_interrupt_on
             inline_subagents.append(processed_spec)
@@ -768,6 +787,29 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
             general_purpose_spec["interrupt_on"] = gp_interrupt_on
 
         inline_subagents.insert(0, general_purpose_spec)
+
+    if any(spec.get("fork") for spec in inline_subagents):
+        sync_prompt_padding = _build_fork_subagent_system_prompt(inline_subagents)
+        forked_inline_subagents: list[SubAgent | CompiledSubAgent] = []
+        for spec in inline_subagents:
+            if "runnable" in spec or not spec.get("fork"):
+                forked_inline_subagents.append(spec)
+                continue
+            middleware_for_fork = list(spec.get("middleware", []))
+            forked_inline_subagents.append(
+                prepare_forked_subagent_spec(
+                    spec,
+                    parent_system_prompt=final_system_prompt,
+                    sync_prompt_padding_text=sync_prompt_padding,
+                    async_prompt_padding_text=None,
+                    middleware_before_sync_padding=middleware_for_fork,
+                    middleware_before_async_padding=[],
+                    parent_middleware=[],
+                    user_middleware=[],
+                    middleware_after_user=[],
+                )
+            )
+        inline_subagents = forked_inline_subagents
 
     # Build main agent middleware stack
     deepagent_middleware: list[AgentMiddleware[Any, Any, Any]] = [
@@ -853,14 +895,6 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
         required_classes=_REQUIRED_MIDDLEWARE_CLASSES,
         required_names=_REQUIRED_MIDDLEWARE_NAMES,
     )
-
-    base_prompt = _apply_profile_prompt(_profile, BASE_AGENT_PROMPT)
-    if system_prompt is None:
-        final_system_prompt: str | SystemMessage = base_prompt
-    elif isinstance(system_prompt, SystemMessage):
-        final_system_prompt = SystemMessage(content_blocks=[*system_prompt.content_blocks, {"type": "text", "text": f"\n\n{base_prompt}"}])
-    else:
-        final_system_prompt = system_prompt + "\n\n" + base_prompt
 
     return create_agent(
         model,
