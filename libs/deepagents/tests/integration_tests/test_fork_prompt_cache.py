@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import random
+import string
 import uuid
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -42,26 +44,19 @@ SYSTEM_PROMPT = "Use the task tool calls requested by the scripted parent model.
 USER_PROMPT = "Delegate to every cache probe subagent so each one can recover its assigned paired number from prior context."
 MIN_EXPECTED_CACHED_TOKENS = 4_096
 MIN_EXPECTED_CACHE_RATIO = 0.80
-PAIR_BY_KEY = {
-    "38472": "918263",
-    "75910": "284650",
-    "12638": "775491",
-    "90841": "336702",
-    "47205": "640119",
-    "63194": "502873",
-    "81527": "197346",
-    "29386": "854201",
-    "54072": "419638",
-    "68713": "730524",
-    "34958": "265917",
-    "71620": "948305",
-    "20549": "573816",
-    "89314": "681270",
-    "45826": "307945",
-    "97035": "126584",
-    "62108": "792463",
-    "13479": "845026",
-}
+
+
+def _random_pairs() -> dict[str, str]:
+    rng = random.Random(12_345)
+    pairs: dict[str, str] = {}
+    while len(pairs) < PAIR_COUNT:
+        key = "".join(rng.choice(string.ascii_lowercase) for _ in range(3))
+        code = f"{rng.randrange(1000):03d}"
+        pairs.setdefault(key, code)
+    return pairs
+
+
+PAIR_BY_KEY = _random_pairs()
 PAIR_KEYS = list(PAIR_BY_KEY)
 
 
@@ -109,7 +104,7 @@ def _long_prior_conversation() -> list[BaseMessage]:
             HumanMessage(
                 content=(
                     f"Historical user turn {idx}: {_cacheable_prefix()} "
-                    f"Record lookup pair KEY-{key} VALUE-{value}. "
+                    f"Record lookup pair {key} = {value}. "
                     "Remember this as shared context before any subagent is forked."
                 )
             )
@@ -118,7 +113,7 @@ def _long_prior_conversation() -> list[BaseMessage]:
             AIMessage(
                 content=(
                     f"Historical assistant turn {idx}: {_cacheable_prefix()} "
-                    f"I have stored lookup pair KEY-{key} VALUE-{value}. "
+                    f"I have stored lookup pair {key} = {value}. "
                     "This response is part of the parent conversation prefix."
                 )
             )
@@ -171,7 +166,7 @@ def _parallel_fork_tool_calls() -> list[dict[str, Any]]:
         {
             "name": "task",
             "args": {
-                "description": (f"Find the paired VALUE for KEY-{_subagent_key(idx)} in the prior conversation. Respond with only the VALUE digits."),
+                "description": (f"Find the 3-digit code paired with key {_subagent_key(idx)} in the prior conversation. Respond with only the code."),
                 "subagent_type": _subagent_name(idx),
             },
             "id": f"call-cache-probe-{idx}",
@@ -220,9 +215,9 @@ def test_forked_subagent_reports_openai_prompt_cache_reuse() -> None:
                 "name": _subagent_name(idx),
                 "description": f"Retrieves the paired value for live prompt-cache verification probe {idx}.",
                 "system_prompt": (
-                    f"You are cache probe {idx}. Your assigned lookup key is KEY-{_subagent_key(idx)}. "
-                    "Use the inherited prior conversation to find the matching VALUE. "
-                    "Return only the VALUE digits and no other text."
+                    f"You are cache probe {idx}. Your assigned lookup key is {_subagent_key(idx)}. "
+                    "Use the inherited prior conversation to find the matching 3-digit code. "
+                    "Return only the code and no other text."
                 ),
                 "tools": [],
                 "middleware": [capture.middleware_for(_subagent_name(idx))],
@@ -249,7 +244,7 @@ def test_forked_subagent_reports_openai_prompt_cache_reuse() -> None:
         input_tokens = _input_token_count(fork_response)
         ratio = cached / input_tokens if input_tokens else 0
         if expected_value not in response_text:
-            failures.append(f"{name}: expected VALUE-{expected_value}, got {response_text!r}")
+            failures.append(f"{name}: expected code {expected_value}, got {response_text!r}")
         if cached < MIN_EXPECTED_CACHED_TOKENS or ratio < MIN_EXPECTED_CACHE_RATIO:
             failures.append(f"{name}: input_tokens={input_tokens}, cached_tokens={cached}, ratio={ratio:.2%}")
 
