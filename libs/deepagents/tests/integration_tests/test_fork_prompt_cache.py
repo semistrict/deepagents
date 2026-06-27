@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, ModelResponse
@@ -34,6 +34,14 @@ def _cacheable_prefix() -> str:
         "has enough tokens to report a cache read. "
     )
     return chunk * 260
+
+
+SYSTEM_PROMPT = _cacheable_prefix() + "\n\nAlways use the task tool exactly once. Select the cache_probe subagent and do not answer directly."
+USER_PROMPT = "Delegate to the cache_probe subagent with the instruction: confirm the cache probe."
+
+
+class _Invokable(Protocol):
+    def invoke(self, values: dict[str, Any], config: dict[str, Any]) -> object: ...
 
 
 def _nested_int(value: object, *path: str) -> int:
@@ -73,13 +81,18 @@ class _CaptureModelResponses(AgentMiddleware[Any, Any, Any]):
         return response
 
 
+def _invoke_cache_probe(agent: _Invokable) -> None:
+    agent.invoke(
+        {"messages": [{"role": "user", "content": USER_PROMPT}]},
+        config={"configurable": {"thread_id": f"live-prompt-cache-{uuid.uuid4()}"}},
+    )
+
+
 def test_forked_subagent_reports_openai_prompt_cache_reuse() -> None:
     capture = _CaptureModelResponses()
     agent = create_deep_agent(
         model=_live_model(),
-        system_prompt=(
-            _cacheable_prefix() + "\n\nAlways use the task tool exactly once. Select the cache_probe subagent and do not answer directly."
-        ),
+        system_prompt=SYSTEM_PROMPT,
         checkpointer=MemorySaver(),
         subagents=[
             {
@@ -93,17 +106,9 @@ def test_forked_subagent_reports_openai_prompt_cache_reuse() -> None:
         ],
     )
 
-    agent.invoke(
-        {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "Delegate to the cache_probe subagent with the instruction: confirm the cache probe.",
-                }
-            ]
-        },
-        config={"configurable": {"thread_id": f"live-prompt-cache-{uuid.uuid4()}"}},
-    )
+    _invoke_cache_probe(agent)
+    capture.messages.clear()
+    _invoke_cache_probe(agent)
 
     assert capture.messages, "Forked subagent model response was not captured; the parent may not have delegated."
     cached = max(_cached_token_count(message) for message in capture.messages)
