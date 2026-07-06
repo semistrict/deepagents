@@ -59,15 +59,13 @@ import re
 from typing import TYPE_CHECKING, Annotated, NotRequired, TypedDict
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from langchain_core.runnables import RunnableConfig
     from langgraph.runtime import Runtime
 
+    from deepagents._flow import Flow
     from deepagents.backends.protocol import BACKEND_TYPES, BackendProtocol
 
 from langchain.agents.middleware.types import (
-    AgentMiddleware,
     AgentState,
     ContextT,
     ModelRequest,
@@ -79,7 +77,9 @@ from langchain.tools import ToolRuntime
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import ContentBlock, SystemMessage
 
-from deepagents.backends.protocol import _resolve_backend
+from deepagents._flow import Call
+from deepagents.backends.protocol import _resolve_backend, flows
+from deepagents.middleware._flow_base import FlowMiddleware
 from deepagents.middleware._utils import append_to_system_message
 
 logger = logging.getLogger(__name__)
@@ -177,7 +177,7 @@ def _strip_html_comments(text: str) -> str:
     return _HTML_COMMENT_RE.sub("", text)
 
 
-class MemoryMiddleware(AgentMiddleware[MemoryState, ContextT, ResponseT]):
+class MemoryMiddleware(FlowMiddleware[MemoryState, ContextT, ResponseT]):
     """Middleware for loading agent memory from `AGENTS.md` files.
 
     Loads memory content from configured sources and injects into the system
@@ -300,41 +300,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryState, ContextT, ResponseT]):
         memory_body = "\n\n".join(sections)
         return template.format(agent_memory=memory_body)
 
-    def before_agent(self, state: MemoryState, runtime: Runtime, config: RunnableConfig) -> MemoryStateUpdate | None:  # ty: ignore[invalid-method-override]
-        """Load memory content before agent execution (synchronous).
-
-        Loads memory from all configured sources and stores in state.
-        Only loads if not already present in state.
-
-        Args:
-            state: Current agent state.
-            runtime: Runtime context.
-            config: Runnable config.
-
-        Returns:
-            State update with memory_contents populated.
-        """
-        # Skip if already loaded
-        if "memory_contents" in state:
-            return None
-
-        backend = self._get_backend(state, runtime, config)
-        contents: dict[str, str] = {}
-
-        results = backend.download_files(list(self.sources))
-        for path, response in zip(self.sources, results, strict=True):
-            if response.error is not None:
-                if response.error == "file_not_found":
-                    continue
-                msg = f"Failed to download {path}: {response.error}"
-                raise ValueError(msg)
-            if response.content is not None:
-                contents[path] = response.content.decode("utf-8")
-                logger.debug("Loaded memory from: %s", path)
-
-        return MemoryStateUpdate(memory_contents=contents)
-
-    async def abefore_agent(self, state: MemoryState, runtime: Runtime, config: RunnableConfig) -> MemoryStateUpdate | None:  # ty: ignore[invalid-method-override]
+    def before_agent_flow(self, state: MemoryState, runtime: Runtime, config: RunnableConfig) -> Flow[MemoryStateUpdate | None]:
         """Load memory content before agent execution.
 
         Loads memory from all configured sources and stores in state.
@@ -355,7 +321,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryState, ContextT, ResponseT]):
         backend = self._get_backend(state, runtime, config)
         contents: dict[str, str] = {}
 
-        results = await backend.adownload_files(list(self.sources))
+        results = yield flows(backend).download_files(list(self.sources))
         for path, response in zip(self.sources, results, strict=True):
             if response.error is not None:
                 if response.error == "file_not_found":
@@ -406,36 +372,13 @@ class MemoryMiddleware(AgentMiddleware[MemoryState, ContextT, ResponseT]):
             return request
         return request.override(system_message=new_system_message)
 
-    def wrap_model_call(
-        self,
-        request: ModelRequest[ContextT],
-        handler: Callable[[ModelRequest[ContextT]], ModelResponse[ResponseT]],
-    ) -> ModelResponse[ResponseT]:
-        """Wrap model call to inject memory into system prompt.
+    def model_call_flow(self, request: ModelRequest[ContextT]) -> Flow[ModelResponse[ResponseT]]:
+        """Inject memory into the system prompt around the model call.
 
         Args:
             request: Model request being processed.
-            handler: Handler function to call with modified request.
 
         Returns:
-            Model response from handler.
+            Model response from the wrapped handler.
         """
-        modified_request = self.modify_request(request)
-        return handler(modified_request)
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[ContextT],
-        handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse[ResponseT]]],
-    ) -> ModelResponse[ResponseT]:
-        """Async wrap model call to inject memory into system prompt.
-
-        Args:
-            request: Model request being processed.
-            handler: Async handler function to call with modified request.
-
-        Returns:
-            Model response from handler.
-        """
-        modified_request = self.modify_request(request)
-        return await handler(modified_request)
+        return (yield Call(self.modify_request(request)))

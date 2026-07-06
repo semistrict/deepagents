@@ -110,17 +110,17 @@ import yaml
 from langchain.agents.middleware.types import PrivateStateAttr
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Sequence
 
     from langchain_core.runnables import RunnableConfig
     from langgraph.runtime import Runtime
 
+    from deepagents._flow import Flow
     from deepagents.backends.protocol import BACKEND_TYPES, BackendProtocol
 
 from typing import NotRequired, TypedDict
 
 from langchain.agents.middleware.types import (
-    AgentMiddleware,
     AgentState,
     ContextT,
     ModelRequest,
@@ -129,8 +129,10 @@ from langchain.agents.middleware.types import (
 )
 from langgraph.prebuilt import ToolRuntime
 
-from deepagents.backends.protocol import FILE_NOT_FOUND, FileDownloadResponse, LsResult, _resolve_backend
+from deepagents._flow import Call, arun_flow, run_flow
+from deepagents.backends.protocol import FILE_NOT_FOUND, FileDownloadResponse, LsResult, _resolve_backend, flows
 from deepagents.backends.utils import to_posix_path
+from deepagents.middleware._flow_base import FlowMiddleware
 from deepagents.middleware._utils import append_to_system_message
 
 logger = logging.getLogger(__name__)
@@ -570,7 +572,7 @@ def _format_skills_source_error(source_path: str, error: str) -> str:
     return f"Cannot load skills from '{source_path}': {error}"
 
 
-def _list_skills_with_errors(backend: BackendProtocol, source_path: str) -> tuple[list[SkillMetadata], str | None]:
+def _list_skills_flow(backend: BackendProtocol, source_path: str) -> Flow[tuple[list[SkillMetadata], str | None]]:
     """List all skills from a backend source.
 
     Scans backend for subdirectories containing `SKILL.md` files, downloads
@@ -594,7 +596,7 @@ def _list_skills_with_errors(backend: BackendProtocol, source_path: str) -> tupl
     """
     skills: list[SkillMetadata] = []
     source_error: str | None = None
-    ls_result = backend.ls(source_path)
+    ls_result = yield flows(backend).ls(source_path)
     if isinstance(ls_result, LsResult) and ls_result.error:
         msg = _format_skills_source_error(source_path, ls_result.error)
         logger.warning("%s", msg)
@@ -620,7 +622,7 @@ def _list_skills_with_errors(backend: BackendProtocol, source_path: str) -> tupl
         skill_md_paths.append((skill_dir_path, skill_md_path))
 
     paths_to_download = [skill_md_path for _, skill_md_path in skill_md_paths]
-    responses = backend.download_files(paths_to_download)
+    responses = yield flows(backend).download_files(paths_to_download)
 
     for (skill_dir_path, skill_md_path), response in zip(skill_md_paths, responses, strict=True):
         skill_metadata = _skill_metadata_from_response(response, skill_dir_path, skill_md_path)
@@ -631,74 +633,14 @@ def _list_skills_with_errors(backend: BackendProtocol, source_path: str) -> tupl
 
 
 def _list_skills(backend: BackendProtocol, source_path: str) -> list[SkillMetadata]:
-    """List all skills from a backend source."""
-    skills, _error = _list_skills_with_errors(backend, source_path)
+    """List all skills from a backend source. See `_list_skills_flow`."""
+    skills, _error = run_flow(_list_skills_flow(backend, source_path))
     return skills
 
 
-async def _alist_skills_with_errors(backend: BackendProtocol, source_path: str) -> tuple[list[SkillMetadata], str | None]:
-    """List all skills from a backend source (async version).
-
-    Scans backend for subdirectories containing `SKILL.md` files, downloads
-    their content, parses YAML frontmatter, and returns skill metadata.
-
-    Expected structure:
-
-    ```txt
-    source_path/
-    └── skill-name/
-        ├── SKILL.md   # Required
-        └── helper.py  # Optional
-    ```
-
-    Args:
-        backend: Backend instance to use for file operations
-        source_path: Path to the skills directory in the backend
-
-    Returns:
-        Tuple of skill metadata and an optional source-level loading error.
-    """
-    skills: list[SkillMetadata] = []
-    source_error: str | None = None
-    ls_result = await backend.als(source_path)
-    if isinstance(ls_result, LsResult) and ls_result.error:
-        msg = _format_skills_source_error(source_path, ls_result.error)
-        logger.warning("%s", msg)
-        source_error = msg
-
-    items = ls_result.entries if isinstance(ls_result, LsResult) else ls_result
-
-    # Find all skill directories (directories containing SKILL.md)
-    skill_dirs = []
-    for item in items or []:
-        if not item.get("is_dir"):
-            continue
-        skill_dirs.append(item["path"])
-
-    if not skill_dirs:
-        return [], source_error
-
-    # For each skill directory, check if SKILL.md exists and download it
-    skill_md_paths = []
-    for skill_dir_path in skill_dirs:
-        skill_dir = PurePosixPath(to_posix_path(skill_dir_path))
-        skill_md_path = str(skill_dir / "SKILL.md")
-        skill_md_paths.append((skill_dir_path, skill_md_path))
-
-    paths_to_download = [skill_md_path for _, skill_md_path in skill_md_paths]
-    responses = await backend.adownload_files(paths_to_download)
-
-    for (skill_dir_path, skill_md_path), response in zip(skill_md_paths, responses, strict=True):
-        skill_metadata = _skill_metadata_from_response(response, skill_dir_path, skill_md_path)
-        if skill_metadata is not None:
-            skills.append(skill_metadata)
-
-    return skills, source_error
-
-
 async def _alist_skills(backend: BackendProtocol, source_path: str) -> list[SkillMetadata]:
-    """List all skills from a backend source (async version)."""
-    skills, _error = await _alist_skills_with_errors(backend, source_path)
+    """List all skills from a backend source (async version). See `_list_skills_flow`."""
+    skills, _error = await arun_flow(_list_skills_flow(backend, source_path))
     return skills
 
 
@@ -745,7 +687,7 @@ User: "Can you research the latest developments in quantum computing?"
 Remember: Skills make you more capable and consistent. When in doubt, check if a skill exists for the task!"""
 
 
-class SkillsMiddleware(AgentMiddleware[SkillsState, ContextT, ResponseT]):
+class SkillsMiddleware(FlowMiddleware[SkillsState, ContextT, ResponseT]):
     """Middleware for loading and exposing agent skills to the system prompt.
 
     Loads skills from backend sources and injects them into the system prompt
@@ -938,8 +880,8 @@ class SkillsMiddleware(AgentMiddleware[SkillsState, ContextT, ResponseT]):
 
         return request.override(system_message=new_system_message)
 
-    def before_agent(self, state: SkillsState, runtime: Runtime, config: RunnableConfig) -> SkillsStateUpdate | None:  # ty: ignore[invalid-method-override]
-        """Load skills metadata before agent execution (synchronous).
+    def before_agent_flow(self, state: SkillsState, runtime: Runtime, config: RunnableConfig) -> Flow[SkillsStateUpdate | None]:
+        """Load skills metadata before agent execution.
 
         Loads skills once per session from all configured sources. If
         `skills_metadata` is already present in state (from a prior turn or
@@ -968,7 +910,7 @@ class SkillsMiddleware(AgentMiddleware[SkillsState, ContextT, ResponseT]):
         # Load skills from each source in order
         # Later sources override earlier ones (last one wins)
         for source_path in self.sources:
-            source_skills, source_error = _list_skills_with_errors(backend, source_path)
+            source_skills, source_error = yield from _list_skills_flow(backend, source_path)
             if source_error is not None:
                 skills_load_errors.append(source_error)
             for skill in source_skills:
@@ -984,85 +926,16 @@ class SkillsMiddleware(AgentMiddleware[SkillsState, ContextT, ResponseT]):
             update["skills_load_errors"] = skills_load_errors
         return update
 
-    async def abefore_agent(self, state: SkillsState, runtime: Runtime, config: RunnableConfig) -> SkillsStateUpdate | None:  # ty: ignore[invalid-method-override]
-        """Load skills metadata before agent execution (async).
-
-        Loads skills once per session from all configured sources. If
-        `skills_metadata` is already present in state (from a prior turn or
-        checkpointed session), the load is skipped and `None` is returned.
-
-        Skills are loaded in source order with later sources overriding
-        earlier ones if they contain skills with the same name (last one wins).
-
-        Args:
-            state: Current agent state.
-            runtime: Runtime context.
-            config: Runnable config.
-
-        Returns:
-            State update with `skills_metadata` populated, or `None` if already present.
-        """
-        # Skip if skills_metadata is already present in state (even if empty)
-        if "skills_metadata" in state:
-            return None
-
-        # Resolve backend (supports both direct instances and factory functions)
-        backend = self._get_backend(state, runtime, config)
-        all_skills: dict[str, SkillMetadata] = {}
-        skills_load_errors: list[str] = []
-
-        # Load skills from each source in order
-        # Later sources override earlier ones (last one wins)
-        for source_path in self.sources:
-            source_skills, source_error = await _alist_skills_with_errors(backend, source_path)
-            if source_error is not None:
-                skills_load_errors.append(source_error)
-            for skill in source_skills:
-                all_skills[skill["name"]] = skill
-
-        skills = list(all_skills.values())
-        update = SkillsStateUpdate(skills_metadata=skills)
-        if skills_load_errors:
-            # Log even when `system_prompt_template is None`, otherwise the
-            # warnings only reach the model via the prompt fragment and
-            # silently disappear when the fragment is suppressed.
-            logger.warning("Skills load errors: %s", skills_load_errors)
-            update["skills_load_errors"] = skills_load_errors
-        return update
-
-    def wrap_model_call(
-        self,
-        request: ModelRequest[ContextT],
-        handler: Callable[[ModelRequest[ContextT]], ModelResponse[ResponseT]],
-    ) -> ModelResponse[ResponseT]:
+    def model_call_flow(self, request: ModelRequest[ContextT]) -> Flow[ModelResponse[ResponseT]]:
         """Inject skills documentation into the system prompt.
 
         Args:
             request: Model request being processed
-            handler: Handler function to call with modified request
 
         Returns:
-            Model response from handler
+            Model response from the wrapped handler
         """
-        modified_request = self.modify_request(request)
-        return handler(modified_request)
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[ContextT],
-        handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse[ResponseT]]],
-    ) -> ModelResponse[ResponseT]:
-        """Inject skills documentation into the system prompt (async version).
-
-        Args:
-            request: Model request being processed
-            handler: Async handler function to call with modified request
-
-        Returns:
-            Model response from handler
-        """
-        modified_request = self.modify_request(request)
-        return await handler(modified_request)
+        return (yield Call(self.modify_request(request)))
 
 
 __all__ = ["SkillMetadata", "SkillsMiddleware"]

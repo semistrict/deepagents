@@ -10,7 +10,7 @@ import mimetypes
 import threading
 import uuid
 from binascii import Error as BinasciiError
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NotRequired, cast
@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
 import wcmatch.glob as wcglob
 from langchain.agents.middleware.types import (
-    AgentMiddleware,
     AgentState,
     ContextT,
     ExtendedModelResponse,
@@ -40,6 +39,7 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from deepagents._api.deprecation import warn_deprecated
+from deepagents._flow import Call, Flow, io
 from deepagents.backends import CompositeBackend, FilesystemBackend, LocalShellBackend, StateBackend
 from deepagents.backends.composite import _route_for_path
 from deepagents.backends.protocol import (
@@ -59,6 +59,7 @@ from deepagents.backends.protocol import (
     _resolve_backend,
     _supports_delete,
     execute_accepts_timeout,
+    flows,
 )
 from deepagents.backends.sandbox import BaseSandbox
 from deepagents.backends.utils import (
@@ -77,6 +78,7 @@ from deepagents.backends.utils import (
     truncate_if_too_long,
     validate_path,
 )
+from deepagents.middleware._flow_base import FlowMiddleware
 from deepagents.middleware._message_eviction import (
     TOO_LARGE_TOOL_MSG as TOO_LARGE_TOOL_MSG,
     _aoffload_tool_message_content,
@@ -1172,7 +1174,7 @@ def _build_truncated_human_message(message: HumanMessage, file_path: str) -> Hum
     return message.model_copy(update={"content": evicted})
 
 
-class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]):
+class FilesystemMiddleware(FlowMiddleware[FilesystemState, ContextT, ResponseT]):
     """Middleware for providing filesystem and optional execution tools to an agent.
 
     This middleware adds filesystem tools to the agent: `ls`, `read_file`, `write_file`,
@@ -2567,13 +2569,11 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
     def _filter_unsupported_tools_and_apply_prompt(self, request: ModelRequest[ContextT]) -> ModelRequest[ContextT]:
         """Drop capability-gated tools the backend can't serve, then apply the system prompt.
 
-        Shared by the sync and async `wrap_model_call` paths (the only part that
-        differs between them is sync vs. async message eviction). The `execute`
+        Called from `model_call_flow` before message eviction. The `execute`
         and `delete` tools are optional per backend, so when the resolved
         backend doesn't support a capability the corresponding tool is filtered
         out of the request rather than advertised to the model and left to fail
-        at call time. Resolving the backend and probing support is synchronous,
-        so both paths route through here.
+        at call time. Resolving the backend and probing support is synchronous.
 
         Returns the request with unsupported tools removed and the filesystem
         system prompt appended.
@@ -2618,11 +2618,10 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
 
         return request
 
-    def wrap_model_call(
+    def model_call_flow(
         self,
         request: ModelRequest[ContextT],
-        handler: Callable[[ModelRequest[ContextT]], ModelResponse[ResponseT]],
-    ) -> ModelResponse[ResponseT] | ExtendedModelResponse:
+    ) -> Flow[ModelResponse[ResponseT] | ExtendedModelResponse]:
         """Update the system prompt, filter tools, and evict oversized HumanMessages.
 
         In addition to the system-prompt and tool-filtering logic, this method
@@ -2637,7 +2636,6 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
 
         Args:
             request: The model request being processed.
-            handler: The handler function to call with the modified request.
 
         Returns:
             The model response, or an `ExtendedModelResponse` with a state
@@ -2649,51 +2647,16 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
         if request_messages != list(request.messages):
             request = request.override(messages=request_messages)
 
-        eviction_result = self._evict_and_truncate_messages(request)
+        eviction_result = yield from self._evict_and_truncate_messages(request)
         if eviction_result is not None:
             messages, state_command = eviction_result
             request = request.override(messages=messages)
-            response = handler(request)
+            response = yield Call(request)
             if state_command is not None:
                 return ExtendedModelResponse(model_response=response, command=state_command)
             return response
 
-        return handler(request)
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[ContextT],
-        handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse[ResponseT]]],
-    ) -> ModelResponse[ResponseT] | ExtendedModelResponse:
-        """(async) Update the system prompt and filter tools based on backend capabilities.
-
-        Also evicts oversized HumanMessages to the filesystem. See
-        `wrap_model_call` for full documentation.
-
-        Args:
-            request: The model request being processed.
-            handler: The handler function to call with the modified request.
-
-        Returns:
-            The model response from the handler, or an `ExtendedModelResponse`
-                with a state update tagging newly evicted messages.
-        """
-        request = self._filter_unsupported_tools_and_apply_prompt(request)
-
-        request_messages = _move_media_results_after_tool_results(list(request.messages))
-        if request_messages != list(request.messages):
-            request = request.override(messages=request_messages)
-
-        eviction_result = await self._aevict_and_truncate_messages(request)
-        if eviction_result is not None:
-            messages, state_command = eviction_result
-            request = request.override(messages=messages)
-            response = await handler(request)
-            if state_command is not None:
-                return ExtendedModelResponse(model_response=response, command=state_command)
-            return response
-
-        return await handler(request)
+        return (yield Call(request))
 
     def _process_large_message(
         self,
@@ -2879,7 +2842,7 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
     def _evict_and_truncate_messages(
         self,
         request: ModelRequest[ContextT],
-    ) -> tuple[list[AnyMessage], Command | None] | None:
+    ) -> Flow[tuple[list[AnyMessage], Command | None] | None]:
         """Evict a new oversized `HumanMessage` and truncate all tagged messages.
 
         Returns `None` if no messages needed processing (fast path). Otherwise
@@ -2903,33 +2866,7 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
         if new_eviction_needed:
             backend = self._get_backend_from_runtime(request.state, request.runtime)
             file_path = f"{self._conversation_history_prefix}/{uuid.uuid4()}.md"
-            write_result = backend.write(file_path, _extract_text_from_message(messages[-1]))
-
-        return self._apply_eviction_and_truncate(messages, write_result, file_path)
-
-    async def _aevict_and_truncate_messages(
-        self,
-        request: ModelRequest[ContextT],
-    ) -> tuple[list[AnyMessage], Command | None] | None:
-        """Async version of `_evict_and_truncate_messages`.
-
-        Args:
-            request: The model request being processed.
-
-        Returns:
-            Tuple of `(messages, command)` if any processing occurred, else `None`.
-        """
-        messages = list(request.messages)
-        has_tagged, new_eviction_needed = self._check_eviction_needed(messages)
-        if not has_tagged and not new_eviction_needed:
-            return None
-
-        write_result: WriteResult | None = None
-        file_path: str | None = None
-        if new_eviction_needed:
-            backend = self._get_backend_from_runtime(request.state, request.runtime)
-            file_path = f"{self._conversation_history_prefix}/{uuid.uuid4()}.md"
-            write_result = await backend.awrite(file_path, _extract_text_from_message(messages[-1]))
+            write_result = yield flows(backend).write(file_path, _extract_text_from_message(messages[-1]))
 
         return self._apply_eviction_and_truncate(messages, write_result, file_path)
 
@@ -3050,16 +2987,11 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
         msg = f"Unreachable code reached in _aintercept_large_tool_result: for tool_result of type {type(tool_result)}"
         raise AssertionError(msg)
 
-    def wrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], ToolMessage | Command],
-    ) -> ToolMessage | Command:
+    def tool_call_flow(self, request: ToolCallRequest) -> Flow[ToolMessage | Command]:
         """Check the size of the tool call result and evict to filesystem if too large.
 
         Args:
             request: The tool call request being processed.
-            handler: The handler function to call with the modified request.
 
         Returns:
             The raw `ToolMessage`, or a pseudo tool message with the `ToolResult` in state.
@@ -3069,34 +3001,16 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
             Tool-execution exceptions (including `ToolException`) propagate
             through this wrapper unhandled by design.
         """
-        tool_result = handler(request)
+        tool_result = yield Call(request)
 
         if self._tool_token_limit_before_evict is None or request.tool_call["name"] in TOOLS_EXCLUDED_FROM_EVICTION:
             return tool_result
 
-        return self._intercept_large_tool_result(tool_result, request.runtime)
-
-    async def awrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
-    ) -> ToolMessage | Command:
-        """(async) Check the size of the tool call result and evict to filesystem if too large.
-
-        Args:
-            request: The tool call request being processed.
-            handler: The handler function to call with the modified request.
-
-        Returns:
-            The raw `ToolMessage`, or a pseudo tool message with the `ToolResult` in state.
-
-        Note:
-            Tool-execution exceptions (including `ToolException`) propagate
-                through this wrapper unhandled by design.
-        """
-        tool_result = await handler(request)
-
-        if self._tool_token_limit_before_evict is None or request.tool_call["name"] in TOOLS_EXCLUDED_FROM_EVICTION:
-            return tool_result
-
-        return await self._aintercept_large_tool_result(tool_result, request.runtime)
+        return (
+            yield io(
+                self._intercept_large_tool_result,
+                self._aintercept_large_tool_result,
+                tool_result,
+                request.runtime,
+            )
+        )

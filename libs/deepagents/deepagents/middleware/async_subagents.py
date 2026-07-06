@@ -12,11 +12,10 @@ Compatible with LangGraph Platform (managed) and self-hosted servers.
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
-from langchain.agents.middleware.types import AgentMiddleware, AgentState, ContextT, ModelRequest, ModelResponse, ResponseT
+from langchain.agents.middleware.types import AgentState, ContextT, ModelRequest, ModelResponse, ResponseT
 from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
@@ -26,6 +25,8 @@ from langgraph_sdk.client import LangGraphClient, SyncLangGraphClient
 from langgraph_sdk.schema import Run
 from pydantic import BaseModel, Field
 
+from deepagents._flow import Call, Flow
+from deepagents.middleware._flow_base import FlowMiddleware
 from deepagents.middleware._utils import append_to_system_message
 
 logger = logging.getLogger(__name__)
@@ -865,7 +866,7 @@ def _build_async_subagent_tools(
     ]
 
 
-class AsyncSubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
+class AsyncSubAgentMiddleware(FlowMiddleware[Any, ContextT, ResponseT]):
     """Middleware for async subagents running on remote Agent Protocol servers.
 
     This middleware adds tools for launching, monitoring, and updating
@@ -933,24 +934,9 @@ class AsyncSubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         else:
             self.system_prompt = system_prompt
 
-    def wrap_model_call(
-        self,
-        request: ModelRequest[ContextT],
-        handler: Callable[[ModelRequest[ContextT]], ModelResponse[ResponseT]],
-    ) -> ModelResponse[ResponseT]:
+    def model_call_flow(self, request: ModelRequest[ContextT]) -> Flow[ModelResponse[ResponseT]]:
         """Update the system message to include async subagent instructions."""
         if self.system_prompt is not None:
             new_system_message = append_to_system_message(request.system_message, self.system_prompt)
-            return handler(request.override(system_message=new_system_message))
-        return handler(request)
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[ContextT],
-        handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse[ResponseT]]],
-    ) -> ModelResponse[ResponseT]:
-        """(async) Update the system message to include async subagent instructions."""
-        if self.system_prompt is not None:
-            new_system_message = append_to_system_message(request.system_message, self.system_prompt)
-            return await handler(request.override(system_message=new_system_message))
-        return await handler(request)
+            request = request.override(system_message=new_system_message)
+        return (yield Call(request))

@@ -3,7 +3,7 @@
 import contextlib
 import dataclasses
 import json
-from collections.abc import Awaitable, Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from typing import Any, NotRequired, TypedDict, cast
 
 from langchain.agents import create_agent
@@ -25,7 +25,9 @@ from langgraph.types import Command
 from langsmith.run_helpers import get_tracing_context, tracing_context
 from pydantic import BaseModel, Field
 
+from deepagents._flow import Call, Flow
 from deepagents.backends.protocol import BackendFactory, BackendProtocol
+from deepagents.middleware._flow_base import FlowMiddleware
 from deepagents.middleware._utils import append_to_system_message
 from deepagents.middleware.filesystem import FilesystemPermission
 
@@ -734,7 +736,7 @@ def _build_task_tool(  # noqa: C901, PLR0915
     )
 
 
-class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
+class SubAgentMiddleware(FlowMiddleware[Any, ContextT, ResponseT]):
     """Middleware for providing subagents to an agent via a `task` tool.
 
     This middleware adds a `task` tool to the agent that can be used
@@ -848,24 +850,9 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         )
         self.tools = [task_tool]
 
-    def wrap_model_call(
-        self,
-        request: ModelRequest[ContextT],
-        handler: Callable[[ModelRequest[ContextT]], ModelResponse[ResponseT]],
-    ) -> ModelResponse[ResponseT]:
+    def model_call_flow(self, request: ModelRequest[ContextT]) -> Flow[ModelResponse[ResponseT]]:
         """Update the system message to include instructions on using subagents."""
         if self.system_prompt is not None:
             new_system_message = append_to_system_message(request.system_message, self.system_prompt)
-            return handler(request.override(system_message=new_system_message))
-        return handler(request)
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[ContextT],
-        handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse[ResponseT]]],
-    ) -> ModelResponse[ResponseT]:
-        """(async) Update the system message to include instructions on using subagents."""
-        if self.system_prompt is not None:
-            new_system_message = append_to_system_message(request.system_message, self.system_prompt)
-            return await handler(request.override(system_message=new_system_message))
-        return await handler(request)
+            request = request.override(system_message=new_system_message)
+        return (yield Call(request))
