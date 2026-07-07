@@ -26,7 +26,6 @@ from typing import (
 
 from langchain.agents import create_agent
 from langchain.agents.middleware.types import (
-    AgentMiddleware,
     AgentState,
     ContextT,
     PrivateStateAttr,
@@ -43,12 +42,17 @@ from langchain_core.messages import (
 from pydantic import BaseModel, Discriminator, Field, model_validator
 from typing_extensions import TypedDict
 
+from deepagents._flow import io
+from deepagents.middleware._flow_base import FlowMiddleware
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from langchain_core.language_models import BaseChatModel
     from langchain_core.tools import BaseTool
     from langgraph.runtime import Runtime
+
+    from deepagents._flow import Flow
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +296,7 @@ class GraderResponse(BaseModel):
 
 
 @beta(obj_type="middleware")
-class RubricMiddleware(AgentMiddleware[RubricState, ContextT, ResponseT]):
+class RubricMiddleware(FlowMiddleware[RubricState, ContextT, ResponseT]):
     """Middleware that drives self-evaluated iteration against a rubric.
 
     The middleware activates only when a caller passes a `rubric` on
@@ -424,11 +428,11 @@ class RubricMiddleware(AgentMiddleware[RubricState, ContextT, ResponseT]):
         }
 
     @hook_config(can_jump_to=["model"])
-    def after_agent(
+    def after_agent_flow(
         self,
         state: RubricState,
         runtime: Runtime[ContextT],
-    ) -> dict[str, Any] | None:
+    ) -> Flow[dict[str, Any] | None]:
         """Grade the transcript and decide whether to loop back to the model.
 
         Args:
@@ -446,25 +450,7 @@ class RubricMiddleware(AgentMiddleware[RubricState, ContextT, ResponseT]):
         grading_run_id, iteration = prep
 
         try:
-            graded = self._grade(state, iteration)
-        except Exception as exc:  # noqa: BLE001
-            return self._handle_grader_exception(runtime, state, grading_run_id, iteration, exc)
-
-        return self._finalize_evaluation(graded, state, runtime, grading_run_id, iteration)
-
-    async def aafter_agent(
-        self,
-        state: RubricState,
-        runtime: Runtime[ContextT],
-    ) -> dict[str, Any] | None:
-        """Async variant of `after_agent`. See that method for details."""
-        prep = self._prepare_evaluation(state, runtime)
-        if prep is None:
-            return None
-        grading_run_id, iteration = prep
-
-        try:
-            graded = await self._agrade(state, iteration)
+            graded = yield io(self._grade, self._agrade, state, iteration)
         except Exception as exc:  # noqa: BLE001
             return self._handle_grader_exception(runtime, state, grading_run_id, iteration, exc)
 
@@ -497,9 +483,8 @@ class RubricMiddleware(AgentMiddleware[RubricState, ContextT, ResponseT]):
     ) -> dict[str, Any]:
         """Record the evaluation, emit the end event, and compose state update.
 
-        Shared by sync `after_agent` and async `aafter_agent` so the only
-        difference between the two hook paths is the grader invocation
-        (sync `_grade` vs `await _agrade`).
+        Called from `after_agent_flow` after the grader invocation (the only
+        per-world step, expressed as an `io(_grade, _agrade)` effect).
         """
         evaluation = self._build_evaluation(graded, grading_run_id, iteration)
         if graded.result == "needs_revision" and iteration + 1 >= self.max_iterations:

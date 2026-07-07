@@ -16,6 +16,7 @@ from langchain.agents.middleware.types import ExtendedModelResponse, ModelReques
 from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
+from deepagents._flow import run_flow
 from deepagents.backends.protocol import BackendProtocol, EditResult, FileDownloadResponse, FileUploadResponse, ReadResult, WriteResult
 from deepagents.middleware.summarization import (
     SummarizationMiddleware,
@@ -921,7 +922,7 @@ class TestOffloadingBasic:
         )
 
         messages = make_conversation_messages(num_old=5, num_recent=2)
-        result, failed = middleware._offload_inline_media(backend, messages)
+        result, failed = run_flow(middleware._offload_inline_media(backend, messages))
 
         assert result is messages  # identity: no copy when there is no inline media
         assert failed == 0
@@ -1828,7 +1829,7 @@ class TestWriteEditException:
     def test_summarization_aborts_on_write_exception(self) -> None:
         """Test that summarization warns when `write` raises an exception but still summarizes.
 
-        Covers lines 314-322: Exception handler for write in _offload_to_backend.
+        Covers the exception handler around write in `_offload_to_backend`.
         """
         backend = MockBackend(write_raises=True)
         mock_model = make_mock_model()
@@ -1857,7 +1858,7 @@ class TestWriteEditException:
     async def test_async_summarization_aborts_on_write_exception(self) -> None:
         """Test that async summarization warns when `awrite` raises but still summarizes.
 
-        Covers lines 387-395: Exception handler for awrite in _aoffload_to_backend.
+        Covers the exception handler around awrite in `_offload_to_backend`.
         """
         backend = MockBackend(write_raises=True)
         mock_model = make_mock_model()
@@ -1886,7 +1887,7 @@ class TestWriteEditException:
     def test_summarization_aborts_on_edit_exception(self) -> None:
         """Test that summarization warns when `edit` raises an exception but still summarizes (existing content).
 
-        Covers lines 314-322: Exception handler for edit in _offload_to_backend.
+        Covers the exception handler around edit in `_offload_to_backend`.
         """
         existing = "## Summarized at 2024-01-01T00:00:00Z\n\nHuman: Previous message\n\n"
         backend = MockBackend(existing_content=existing, write_raises=True)
@@ -1916,7 +1917,7 @@ class TestWriteEditException:
     async def test_async_summarization_aborts_on_edit_exception(self) -> None:
         """Test that async summarization warns when `aedit` raises but still summarizes (existing content).
 
-        Covers lines 387-395: Exception handler for aedit in _aoffload_to_backend.
+        Covers the exception handler around aedit in `_offload_to_backend`.
         """
         existing = "## Summarized at 2024-01-01T00:00:00Z\n\nHuman: Previous message\n\n"
         backend = MockBackend(existing_content=existing, write_raises=True)
@@ -3130,7 +3131,7 @@ def test_usage_metadata_trigger() -> None:
 
 
 async def test_async_offload_and_summary_run_concurrently() -> None:
-    """Verify that _aoffload_to_backend and _acreate_summary run in parallel."""
+    """Verify the offload flow and summary generation run in parallel under `Gather`."""
     delay = 0.1
     backend = MockBackend()
     mock_model = make_mock_model()
@@ -3142,15 +3143,14 @@ async def test_async_offload_and_summary_run_concurrently() -> None:
         keep=("messages", 2),
     )
 
-    original_offload = middleware._aoffload_to_backend
+    original_download = backend.adownload_files
     original_summary = middleware._acreate_summary
 
-    async def slow_offload(
-        be: Any,  # noqa: ANN401
-        msgs: Any,  # noqa: ANN401
-    ) -> str | None:
+    async def slow_download(
+        paths: Any,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401
         await asyncio.sleep(delay)
-        return await original_offload(be, msgs)
+        return await original_download(paths)
 
     async def slow_summary(
         msgs: Any,  # noqa: ANN401
@@ -3158,7 +3158,7 @@ async def test_async_offload_and_summary_run_concurrently() -> None:
         await asyncio.sleep(delay)
         return await original_summary(msgs)
 
-    middleware._aoffload_to_backend = slow_offload  # type: ignore[assignment]
+    backend.adownload_files = slow_download  # type: ignore[method-assign]
     middleware._acreate_summary = slow_summary  # type: ignore[assignment]
 
     messages = make_conversation_messages(num_old=6, num_recent=2)

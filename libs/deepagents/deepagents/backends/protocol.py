@@ -18,6 +18,7 @@ from langchain.tools import ToolRuntime
 from typing_extensions import TypedDict
 
 from deepagents._api.deprecation import deprecated, warn_deprecated
+from deepagents._flow import Io
 
 FileFormat = Literal["v1", "v2"]
 r"""File storage format version.
@@ -376,6 +377,15 @@ class BackendProtocol(abc.ABC):  # noqa: B024
         `\\n`). Backends accept this for backwards compatibility and emit a
         `LangChainDeprecationWarning` (a `DeprecationWarning` subclass).
     """
+
+    @property
+    def flows(self) -> "BackendFlows":
+        """Per-operation `Io` effect builders for `deepagents._flow` flows.
+
+        `yield backend.flows.write(path, content)` inside a flow runs `write`
+        under a sync driver and `awrite` under an async driver.
+        """
+        return BackendFlows(self)
 
     def ls(self, path: str) -> "LsResult":
         """List all files in a directory with metadata.
@@ -837,6 +847,82 @@ class BackendProtocol(abc.ABC):  # noqa: B024
         if result.error is not None:
             return result.error
         return result.matches or []
+
+
+class BackendFlows:
+    """Per-operation `Io` effect builders for a backend.
+
+    Each method mirrors a `BackendProtocol` operation and returns an `Io`
+    effect pairing it with its async twin, for use inside `deepagents._flow`
+    flows:
+
+    ```python
+    write_result = yield backend.flows.write(path, content)
+    ```
+
+    A sync driver (`run_flow`) executes the sync operation; an async driver
+    (`arun_flow`) executes the async twin. Obtained via `BackendProtocol.flows`
+    (or `flows()` for possibly duck-typed backends).
+
+    Each arm resolves its backend method lazily at execution time, so a
+    duck-typed backend that implements only one world still works under the
+    matching driver.
+    """
+
+    __slots__ = ("_backend",)
+
+    def __init__(self, backend: BackendProtocol) -> None:
+        """Build effect builders for `backend`."""
+        self._backend = backend
+
+    def ls(self, path: str) -> Io:
+        """`ls`/`als` as an `Io` effect."""
+        return Io(lambda: self._backend.ls(path), lambda: self._backend.als(path))
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> Io:
+        """`read`/`aread` as an `Io` effect."""
+        return Io(lambda: self._backend.read(file_path, offset, limit), lambda: self._backend.aread(file_path, offset, limit))
+
+    def grep(self, pattern: str, path: str | None = None, glob: str | None = None) -> Io:
+        """`grep`/`agrep` as an `Io` effect."""
+        return Io(lambda: self._backend.grep(pattern, path, glob), lambda: self._backend.agrep(pattern, path, glob))
+
+    def glob(self, pattern: str, path: str | None = None) -> Io:
+        """`glob`/`aglob` as an `Io` effect."""
+        return Io(lambda: self._backend.glob(pattern, path), lambda: self._backend.aglob(pattern, path))
+
+    def write(self, file_path: str, content: str) -> Io:
+        """`write`/`awrite` as an `Io` effect."""
+        return Io(lambda: self._backend.write(file_path, content), lambda: self._backend.awrite(file_path, content))
+
+    def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> Io:  # noqa: FBT001, FBT002
+        """`edit`/`aedit` as an `Io` effect."""
+        return Io(
+            lambda: self._backend.edit(file_path, old_string, new_string, replace_all),
+            lambda: self._backend.aedit(file_path, old_string, new_string, replace_all),
+        )
+
+    def delete(self, file_path: str) -> Io:
+        """`delete`/`adelete` as an `Io` effect."""
+        return Io(lambda: self._backend.delete(file_path), lambda: self._backend.adelete(file_path))
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> Io:
+        """`upload_files`/`aupload_files` as an `Io` effect."""
+        return Io(lambda: self._backend.upload_files(files), lambda: self._backend.aupload_files(files))
+
+    def download_files(self, paths: list[str]) -> Io:
+        """`download_files`/`adownload_files` as an `Io` effect."""
+        return Io(lambda: self._backend.download_files(paths), lambda: self._backend.adownload_files(paths))
+
+
+def flows(backend: BackendProtocol) -> BackendFlows:
+    """Effect builders for `backend`, tolerating duck-typed backends.
+
+    Equivalent to `backend.flows` for real backends. Middleware uses this
+    accessor because resolved backends may be duck-typed objects that do not
+    inherit `BackendProtocol` (and so lack the `flows` property).
+    """
+    return BackendFlows(backend)
 
 
 @dataclass

@@ -60,7 +60,6 @@ factories.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import inspect
@@ -81,7 +80,7 @@ from langchain.agents.middleware.summarization import (
     SummarizationMiddleware as LCSummarizationMiddleware,
     TokenCounter,
 )
-from langchain.agents.middleware.types import AgentMiddleware, AgentState, ExtendedModelResponse, PrivateStateAttr
+from langchain.agents.middleware.types import AgentState, ExtendedModelResponse, PrivateStateAttr
 from langchain.tools import ToolRuntime
 from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolCall, ToolMessage, get_buffer_string
@@ -92,8 +91,10 @@ from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from deepagents._api.deprecation import warn_deprecated
+from deepagents._flow import Call, Gather, arun_flow, io, run_flow
 from deepagents.backends import CompositeBackend
-from deepagents.backends.protocol import _resolve_backend
+from deepagents.backends.protocol import _resolve_backend, flows
+from deepagents.middleware._flow_base import FlowMiddleware
 from deepagents.middleware._overflow_clip import _aclip_overflow_tail, _clip_overflow_tail
 from deepagents.middleware._utils import append_to_system_message
 
@@ -117,14 +118,13 @@ DEEPAGENTS_DEFAULT_SUMMARY_PROMPT = DEFAULT_SUMMARY_PROMPT.replace(
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from langchain.agents.middleware.types import ModelRequest, ModelResponse
     from langchain.chat_models import BaseChatModel
     from langchain_core.runnables.config import RunnableConfig
     from langchain_core.tools import BaseTool
     from langgraph.runtime import Runtime
 
+    from deepagents._flow import Flow
     from deepagents.backends.protocol import BACKEND_TYPES, BackendProtocol, FileUploadResponse
 
 logger = logging.getLogger(__name__)
@@ -496,7 +496,7 @@ def _upload_response_error(responses: list[FileUploadResponse]) -> str | None:
     return str(error)
 
 
-class _DeepAgentsSummarizationMiddleware(AgentMiddleware):
+class _DeepAgentsSummarizationMiddleware(FlowMiddleware):
     """Summarization middleware with backend for conversation history offloading."""
 
     state_schema = SummarizationState
@@ -1091,13 +1091,13 @@ A condensed summary follows:
         self,
         backend: BackendProtocol,
         messages: list[AnyMessage],
-    ) -> tuple[list[AnyMessage], int]:
+    ) -> Flow[tuple[list[AnyMessage], int]]:
         """Decode inline `data:` media blocks to files and replace them with path references.
 
         Covers any inline `data:` URL (base64 or percent-encoded/plaintext), not
         just base64, because the XML history renderer drops every inline `data:`
         URL. The caller uploads media before both `_offload_to_backend` and
-        `_create_summary`, so both paths receive messages with inline data
+        `_summary_flow`, so both paths receive messages with inline data
         replaced by path references (or error placeholders when an upload fails).
         The archive keeps addressable `<image url="..." />` references, and the
         summary prompt does not receive raw media bytes.
@@ -1145,7 +1145,7 @@ A condensed summary follows:
                     continue
                 img_path = f"{self._media_prefix}/{key}.{ext}"
                 try:
-                    responses = backend.upload_files([(img_path, raw)])
+                    responses = yield flows(backend).upload_files([(img_path, raw)])
                     if error := _upload_response_error(responses):
                         logger.warning(
                             "Failed to upload media %s to backend: %s",
@@ -1169,64 +1169,11 @@ A condensed summary follows:
 
         return _rewrite_data_url_blocks(messages, path_map)
 
-    async def _aoffload_inline_media(
-        self,
-        backend: BackendProtocol,
-        messages: list[AnyMessage],
-    ) -> tuple[list[AnyMessage], int]:
-        """Async twin of `_offload_inline_media` using `aupload_files`.
-
-        See `_offload_inline_media` for full documentation, including the
-        `(messages, failed_block_count)` return contract.
-        """
-        path_map: dict[str, str] = {}
-        failed_keys: set[str] = set()
-        saw_inline_media = False
-
-        for msg in messages:
-            for block in msg.content_blocks:
-                data_url = _extract_data_url(block)
-                if data_url is None:
-                    continue
-                saw_inline_media = True
-                decoded = _decode_data_url(data_url)
-                if decoded is None:
-                    continue  # undecodable; rewrite emits a failed-offload placeholder
-                raw, ext, _mime = decoded
-                key = hashlib.sha256(raw).hexdigest()[:16]
-                if key in path_map or key in failed_keys:
-                    continue
-                img_path = f"{self._media_prefix}/{key}.{ext}"
-                try:
-                    responses = await backend.aupload_files([(img_path, raw)])
-                    if error := _upload_response_error(responses):
-                        logger.warning(
-                            "Failed to upload media %s to backend: %s",
-                            img_path,
-                            error,
-                        )
-                        failed_keys.add(key)
-                        continue
-                    path_map[key] = img_path
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        "Failed to upload media %s to backend: %s: %s",
-                        img_path,
-                        type(e).__name__,
-                        e,
-                    )
-                    failed_keys.add(key)
-
-        if not saw_inline_media:
-            return messages, 0
-
-        return _rewrite_data_url_blocks(messages, path_map)
-
     def _offload_to_backend(
         self,
         backend: BackendProtocol,
         messages: list[AnyMessage],
-    ) -> str | None:
+    ) -> Flow[str | None]:
         """Persist messages to backend before summarization.
 
         Appends evicted messages to a single markdown file per thread. Each
@@ -1259,7 +1206,7 @@ A condensed summary follows:
         # line-numbered content (for LLM consumption), but edit() expects raw content.
         existing_content = ""
         try:
-            responses = backend.download_files([path])
+            responses = yield flows(backend).download_files([path])
             if responses and responses[0].content is not None and responses[0].error is None:
                 existing_content = responses[0].content.decode("utf-8")
         except Exception as e:  # noqa: BLE001
@@ -1274,83 +1221,8 @@ A condensed summary follows:
         combined_content = existing_content + new_section
 
         try:
-            result = backend.edit(path, existing_content, combined_content) if existing_content else backend.write(path, combined_content)
-            if result is None or result.error:
-                error_msg = result.error if result else "backend returned None"
-                logger.warning(
-                    "Failed to offload conversation history to %s (%d messages): %s",
-                    path,
-                    len(filtered_messages),
-                    error_msg,
-                )
-                return None
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "Exception offloading conversation history to %s (%d messages): %s: %s",
-                path,
-                len(filtered_messages),
-                type(e).__name__,
-                e,
-            )
-            return None
-        else:
-            logger.debug("Offloaded %d messages to %s", len(filtered_messages), path)
-            return path
-
-    async def _aoffload_to_backend(
-        self,
-        backend: BackendProtocol,
-        messages: list[AnyMessage],
-    ) -> str | None:
-        """Persist messages to backend before summarization (async).
-
-        Appends evicted messages to a single markdown file per thread. Each
-        summarization event adds a new section with a timestamp header.
-
-        Previous summary messages are filtered out to avoid redundant storage during
-        chained summarization events.
-
-        A `None` return is non-fatal; callers may proceed without the
-        offloaded history.
-
-        Args:
-            backend: Backend to write to.
-            messages: Messages being summarized.
-
-        Returns:
-            The file path where history was offloaded, or `None` on failure.
-        """
-        path = self._get_history_path()
-
-        # Filter out previous summary messages to avoid redundant storage.
-        # Base64 images are already converted to path references by the caller.
-        filtered_messages = self._filter_summary_messages(messages)
-
-        timestamp = datetime.now(UTC).isoformat()
-        new_section = f"## Summarized at {timestamp}\n\n{get_buffer_string(filtered_messages, format='xml')}\n\n"
-
-        # Read existing content (if any) and append.
-        # Note: We use adownload_files() instead of aread() because read() returns
-        # line-numbered content (for LLM consumption), but edit() expects raw content.
-        existing_content = ""
-        try:
-            responses = await backend.adownload_files([path])
-            if responses and responses[0].content is not None and responses[0].error is None:
-                existing_content = responses[0].content.decode("utf-8")
-        except Exception as e:  # noqa: BLE001
-            # File likely doesn't exist yet, but log for observability
-            logger.debug(
-                "Exception reading existing history from %s (treating as new file): %s: %s",
-                path,
-                type(e).__name__,
-                e,
-            )
-
-        combined_content = existing_content + new_section
-
-        try:
-            result = (
-                await backend.aedit(path, existing_content, combined_content) if existing_content else await backend.awrite(path, combined_content)
+            result = yield (
+                flows(backend).edit(path, existing_content, combined_content) if existing_content else flows(backend).write(path, combined_content)
             )
             if result is None or result.error:
                 error_msg = result.error if result else "backend returned None"
@@ -1374,11 +1246,11 @@ A condensed summary follows:
             logger.debug("Offloaded %d messages to %s", len(filtered_messages), path)
             return path
 
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> ModelResponse | ExtendedModelResponse:
+    def _summary_flow(self, messages_to_summarize: list[AnyMessage]) -> Flow[str]:
+        """Generate a summary for the given messages (see `_flow`)."""
+        return (yield io(self._create_summary, self._acreate_summary, messages_to_summarize))
+
+    def model_call_flow(self, request: ModelRequest) -> Flow[ModelResponse | ExtendedModelResponse]:
         """Process messages before model invocation, with history offloading and arg truncation.
 
         First applies any previous summarization events to reconstruct the effective message list.
@@ -1392,6 +1264,8 @@ A condensed summary follows:
         - If that call raises `ContextOverflowError`, we immediately fall back to
             the summarization path and retry the model call with
             `summary_message + preserved_recent_messages`.
+        - The history offload and summary generation run concurrently on the
+            async path and sequentially on the sync path (via `Gather`).
 
         Unlike the legacy `before_model` approach, this does NOT modify the LangGraph state.
         Instead, it tracks summarization events in middleware state and modifies the model
@@ -1399,7 +1273,6 @@ A condensed summary follows:
 
         Args:
             request: The model request to process.
-            handler: The handler to call with the (possibly modified) request.
 
         Returns:
             A plain `ModelResponse` when no summarization event is created, or
@@ -1431,7 +1304,7 @@ A condensed summary follows:
         overflow_triggered = False
         if not should_summarize:
             try:
-                return handler(request.override(messages=truncated_messages))
+                return (yield Call(request.override(messages=truncated_messages)))
             except ContextOverflowError:
                 overflow_triggered = True
                 # Fallback to summarization on context overflow
@@ -1440,7 +1313,7 @@ A condensed summary follows:
         cutoff_index = self._determine_cutoff_index(truncated_messages)
         if cutoff_index <= 0:
             # Can't summarize, return truncated messages
-            return handler(request.override(messages=truncated_messages))
+            return (yield Call(request.override(messages=truncated_messages)))
 
         messages_to_summarize, preserved_messages = self._partition_messages(truncated_messages, cutoff_index)
 
@@ -1448,7 +1321,9 @@ A condensed summary follows:
         # On overflow, offload the large preserved tail TM batch to per-TM files.
         new_state_tail: list[AnyMessage] = []
         if overflow_triggered:
-            preserved_messages, new_state_tail = _clip_overflow_tail(
+            preserved_messages, new_state_tail = yield io(
+                _clip_overflow_tail,
+                _aclip_overflow_tail,
                 preserved_messages,
                 backend,
                 keep=self._lc_helper.keep,
@@ -1458,148 +1333,15 @@ A condensed summary follows:
             )
 
         # Upload inline media once so both offload and summary see path references.
-        offloaded_media_messages, failed_media = self._offload_inline_media(backend, messages_to_summarize)
+        offloaded_media_messages, failed_media = yield from self._offload_inline_media(backend, messages_to_summarize)
 
-        # Offload to backend first so history is preserved before summarization.
+        # Offload to backend and generate the summary. They are independent:
+        # the async path runs them concurrently, the sync path sequentially
+        # (offload first so history is preserved before summarization).
         # If offload fails, summarization still proceeds (with file_path=None).
-        file_path = self._offload_to_backend(backend, offloaded_media_messages)
-        if file_path is None:
-            msg = "Offloading conversation history to backend failed during summarization. Older messages will not be recoverable."
-            logger.error(msg)
-            warnings.warn(msg, stacklevel=2)
-        elif failed_media:
-            # History was saved, but some media became failed-offload placeholders.
-            # Tie the warning to the saved file so the recovery pointer is honest.
-            msg = (
-                f"Conversation history was offloaded to {file_path}, but {failed_media} media "
-                "block(s) could not be offloaded and appear as failed placeholders in the saved "
-                "history; the original media is not recoverable."
-            )
-            logger.warning(msg)
-            warnings.warn(msg, stacklevel=2)
-
-        # Generate summary
-        summary = self._create_summary(offloaded_media_messages)
-
-        # Build summary message with file path reference
-        new_messages = self._build_new_messages_with_path(summary, file_path)
-
-        previous_event = request.state.get("_summarization_event")
-        state_cutoff_index = self._compute_state_cutoff(previous_event, cutoff_index)
-
-        # Create new summarization event
-        new_event: SummarizationEvent = {
-            "cutoff_index": state_cutoff_index,
-            "summary_message": new_messages[0],  # The HumanMessage with summary  # ty: ignore[invalid-argument-type]
-            "file_path": file_path,
-        }
-
-        # Modify request to use summarized messages
-        modified_messages = [*new_messages, *preserved_messages]
-        response = handler(request.override(messages=modified_messages))
-
-        update: dict[str, Any] = {"_summarization_event": new_event}
-        if new_state_tail:
-            update["messages"] = list(new_state_tail)
-
-        # Return ExtendedModelResponse with state update
-        return ExtendedModelResponse(
-            model_response=response,
-            command=Command(update=update),
-        )
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
-    ) -> ModelResponse | ExtendedModelResponse:
-        """Process messages before model invocation, with history offloading and arg truncation (async).
-
-        First applies any previous summarization events to reconstruct the effective message list.
-        Then truncates large tool arguments in old messages if configured.
-        Finally offloads messages to backend before summarization if thresholds are met.
-
-        Control flow details:
-
-        - If thresholds say "do not summarize", we still attempt one normal
-            model call with the current effective/truncated messages.
-        - If that call raises `ContextOverflowError`, we immediately fall back
-            to the summarization path and retry the model call with
-            `summary_message + preserved_recent_messages`.
-
-        Unlike the legacy `abefore_model` approach, this does NOT modify the LangGraph state.
-        Instead, it tracks summarization events in middleware state and modifies the model
-        request directly.
-
-        Args:
-            request: The model request to process.
-            handler: The handler to call with the (possibly modified) request.
-
-        Returns:
-            A plain `ModelResponse` when no summarization event is created, or
-                an `ExtendedModelResponse` that updates `_summarization_event`
-                with `cutoff_index`, `summary_message`, and `file_path`.
-
-                If `cutoff_index <= 0`, no compaction occurs and no
-                `_summarization_event` update is emitted.
-        """
-        # Get effective messages based on previous summarization events
-        effective_messages = self._get_effective_messages(request)
-
-        # Count once; tool-schema conversion makes each count expensive, so the
-        # count is shared between the truncation check and the summarize check.
-        total_tokens = self._count_tokens(effective_messages, request.system_message, request.tools)
-
-        # Step 1: Truncate args if configured
-        truncated_messages, truncate_modified = self._truncate_args(
-            effective_messages,
-            total_tokens,
-        )
-
-        # Step 2: Check if summarization should happen
-        if truncate_modified:
-            total_tokens = self._count_tokens(truncated_messages, request.system_message, request.tools)
-        should_summarize = self._should_summarize(truncated_messages, total_tokens)
-
-        # If no summarization needed, return with truncated messages
-        overflow_triggered = False
-        if not should_summarize:
-            try:
-                return await handler(request.override(messages=truncated_messages))
-            except ContextOverflowError:
-                overflow_triggered = True
-                # Fallback to summarization on context overflow
-
-        # Step 3: Perform summarization
-        cutoff_index = self._determine_cutoff_index(truncated_messages)
-        if cutoff_index <= 0:
-            # Can't summarize, return truncated messages
-            return await handler(request.override(messages=truncated_messages))
-
-        messages_to_summarize, preserved_messages = self._partition_messages(truncated_messages, cutoff_index)
-
-        backend = self._get_backend(request.state, request.runtime)
-        # On overflow, offload the large preserved tail TM batch to per-TM files.
-        new_state_tail: list[AnyMessage] = []
-        if overflow_triggered:
-            preserved_messages, new_state_tail = await _aclip_overflow_tail(
-                preserved_messages,
-                backend,
-                keep=self._lc_helper.keep,
-                max_input_tokens=self._get_profile_limits(),
-                token_counter=self.token_counter,
-                large_tool_results_prefix=self._large_tool_results_prefix,
-            )
-
-        # Upload inline media once so both offload and summary see path references.
-        # This must complete before the gather since both methods consume the result.
-        offloaded_media_messages, failed_media = await self._aoffload_inline_media(backend, messages_to_summarize)
-
-        # Offload to backend and generate summary concurrently -- they are independent.
-        # If offload fails, summarization still proceeds (with file_path=None).
-        file_path, summary = await asyncio.gather(
-            self._aoffload_to_backend(backend, offloaded_media_messages),
-            self._acreate_summary(offloaded_media_messages),
+        file_path, summary = yield Gather(
+            self._offload_to_backend(backend, offloaded_media_messages),
+            self._summary_flow(offloaded_media_messages),
         )
         if file_path is None:
             msg = "Offloading conversation history to backend failed during summarization. Older messages will not be recoverable."
@@ -1631,7 +1373,7 @@ A condensed summary follows:
 
         # Modify request to use summarized messages
         modified_messages = [*new_messages, *preserved_messages]
-        response = await handler(request.override(messages=modified_messages))
+        response = yield Call(request.override(messages=modified_messages))
 
         update: dict[str, Any] = {"_summarization_event": new_event}
         if new_state_tail:
@@ -1819,7 +1561,7 @@ def create_summarization_tool_middleware(
     return SummarizationToolMiddleware(summarization, system_prompt=system_prompt)
 
 
-class SummarizationToolMiddleware(AgentMiddleware):
+class SummarizationToolMiddleware(FlowMiddleware):
     """Middleware that provides a `compact_conversation` tool for manual compaction.
 
     This middleware composes with a `SummarizationMiddleware` instance, reusing
@@ -2085,29 +1827,7 @@ class SummarizationToolMiddleware(AgentMiddleware):
             A `Command` with `_summarization_event` state update, or a
                 `Command` with a "nothing to compact" or error `ToolMessage`.
         """
-        s = self._summarization
-        tool_call_id = runtime.tool_call_id or ""
-        messages = runtime.state.get("messages", [])
-        event = runtime.state.get("_summarization_event")
-        effective = s._apply_event_to_messages(messages, event)
-
-        if not self._is_eligible_for_compaction(effective):
-            return self._nothing_to_compact(tool_call_id)
-
-        cutoff = s._determine_cutoff_index(effective)
-        if cutoff == 0:
-            return self._nothing_to_compact(tool_call_id)
-
-        try:
-            to_summarize, _ = s._partition_messages(effective, cutoff)
-            summary = s._create_summary(to_summarize)
-            backend = self._resolve_backend(runtime)
-            file_path = s._offload_to_backend(backend, to_summarize)
-        except Exception as exc:  # tool must return a ToolMessage, not raise
-            logger.exception("compact_conversation tool failed")
-            return self._compact_error(tool_call_id, exc)
-
-        return self._build_compact_result(runtime, to_summarize, summary, file_path, event, cutoff)
+        return run_flow(self._compact_flow(runtime))
 
     async def _arun_compact(self, runtime: ToolRuntime) -> Command:
         """Async variant of `_run_compact`. See that method for details.
@@ -2119,6 +1839,10 @@ class SummarizationToolMiddleware(AgentMiddleware):
             A `Command` with `_summarization_event` state update, or a
                 `Command` with a "nothing to compact" or error `ToolMessage`.
         """
+        return await arun_flow(self._compact_flow(runtime))
+
+    def _compact_flow(self, runtime: ToolRuntime) -> Flow[Command]:
+        """Shared body of `_run_compact`/`_arun_compact` (see `_flow`)."""
         s = self._summarization
         tool_call_id = runtime.tool_call_id or ""
         messages = runtime.state.get("messages", [])
@@ -2134,20 +1858,16 @@ class SummarizationToolMiddleware(AgentMiddleware):
 
         try:
             to_summarize, _ = s._partition_messages(effective, cutoff)
-            summary = await s._acreate_summary(to_summarize)
+            summary = yield from s._summary_flow(to_summarize)
             backend = self._resolve_backend(runtime)
-            file_path = await s._aoffload_to_backend(backend, to_summarize)
+            file_path = yield from s._offload_to_backend(backend, to_summarize)
         except Exception as exc:  # tool must return a ToolMessage, not raise
             logger.exception("compact_conversation tool failed")
             return self._compact_error(tool_call_id, exc)
 
         return self._build_compact_result(runtime, to_summarize, summary, file_path, event, cutoff)
 
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> ModelResponse:
+    def model_call_flow(self, request: ModelRequest) -> Flow[ModelResponse]:
         """Inject a compact-tool usage nudge into the system prompt.
 
         This only updates prompt text so the model can decide whether to call
@@ -2156,35 +1876,11 @@ class SummarizationToolMiddleware(AgentMiddleware):
 
         Args:
             request: The model request to process.
-            handler: The handler to call with the modified request.
 
         Returns:
-            The model response from the handler.
+            The model response from the wrapped handler.
         """
         if self.system_prompt is None:
-            return handler(request)
+            return (yield Call(request))
         new_system_message = append_to_system_message(request.system_message, self.system_prompt)
-        return handler(request.override(system_message=new_system_message))
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
-    ) -> ModelResponse:
-        """Inject a compact-tool usage nudge into the system prompt (async).
-
-        This only updates prompt text so the model can decide whether to call
-        `compact_conversation` earlier in long sessions. It does not execute the
-        tool automatically.
-
-        Args:
-            request: The model request to process.
-            handler: The handler to call with the modified request.
-
-        Returns:
-            The model response from the handler.
-        """
-        if self.system_prompt is None:
-            return await handler(request)
-        new_system_message = append_to_system_message(request.system_message, self.system_prompt)
-        return await handler(request.override(system_message=new_system_message))
+        return (yield Call(request.override(system_message=new_system_message)))
