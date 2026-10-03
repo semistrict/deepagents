@@ -1,0 +1,8 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/python"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+

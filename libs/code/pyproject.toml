@@ -149,6 +149,9 @@ all-sandboxes = [
 media = ["av>=18.0.0,<19.0.0", "pillow>=12.3.0,<13.0.0"]
 # (quickjs kept for backwards-compatible install commands)
 quickjs = []
+durable = [
+    "deepagents-durable",
+]
 
 
 [project.scripts]
@@ -189,6 +192,7 @@ test = [
     # Detect blocking calls on the event loop in startup smoke tests; mirrors the
     # Blockbuster instance langgraph-runtime-inmem activates at runtime.
     "blockbuster>=1.5.26,<1.6",
+    "deepagents-durable",
 ]
 
 [tool.hatch.build.hooks.custom]
@@ -218,6 +222,7 @@ langchain-modal = { path = "../partners/modal", editable = true }
 langchain-quickjs = { path = "../partners/quickjs", editable = true }
 langchain-runloop = { path = "../partners/runloop", editable = true }
 langchain-vercel-sandbox = { path = "../partners/vercel", editable = true }
+deepagents-durable = { path = "../durable", editable = true }
 
 [tool.ty.environment]
 python-version = "3.12"

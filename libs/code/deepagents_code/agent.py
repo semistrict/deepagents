@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
     from deepagents.backends.sandbox import SandboxBackendProtocol
     from deepagents.middleware.async_subagents import AsyncSubAgent
-    from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
+    from deepagents.middleware.subagents import AgentFactory, CompiledSubAgent, SubAgent
     from langchain.agents.middleware.types import AgentState
     from langchain.messages import ToolCall
     from langchain_core.language_models import BaseChatModel
@@ -2562,6 +2562,7 @@ def create_cli_agent(
     credentials_snapshot: CredentialsSnapshot | None = None,
     model_result: ModelResult | None = None,
     profile_overrides: dict[str, object] | None = None,
+    agent_factory: AgentFactory | None = None,
 ) -> tuple[Pregel[Any, Any, Any, Any], CompositeBackend]:
     """Create a CLI-configured agent with flexible options.
 
@@ -2737,6 +2738,15 @@ def create_cli_agent(
         model_result: Workspace model metadata used in the generated prompt.
         profile_overrides: Session profile fields retained when side questions
             reconstruct the selected model without a live snapshot.
+        agent_factory: Builds the agent and its subagents from `create_agent`'s
+            arguments instead of compiling LangGraph graphs.
+
+            The interpreter then keeps its state for one turn instead of
+            snapshotting it into the thread.
+
+            !!! warning "Experimental"
+
+                Used by the durable runtime. May change without notice.
 
     Returns:
         2-tuple of `(agent_graph, backend)`
@@ -3179,6 +3189,9 @@ def create_cli_agent(
                     max_ptc_calls=interpreter.max_ptc_calls,
                     max_result_chars=interpreter.max_result_chars,
                     ptc=ptc_option,
+                    # Interpreter snapshots ride in LangGraph state; agents built
+                    # by another factory keep the interpreter for one turn only.
+                    mode="turn" if agent_factory is not None else None,
                 )
             )
 
@@ -3656,8 +3669,11 @@ def create_cli_agent(
             store=store,
             subagents=all_subagents or None,
             name=_sanitize_agent_message_name(assistant_id),
+            agent_factory=agent_factory,
         )
-    if effective_recursion_limit is not None:
+    if effective_recursion_limit is not None and agent_factory is not None:
+        agent = agent.with_config({"recursion_limit": effective_recursion_limit})
+    elif effective_recursion_limit is not None:
         # `Pregel.with_config` uses `merge_configs`, which discards a value equal
         # to LangGraph's environment-derived default. Replace the copied graph's
         # config directly so that inherited default can override the SDK's 9,999.

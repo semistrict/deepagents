@@ -1,0 +1,94 @@
+[build-system]
+requires = ["maturin>=1.15.0,<2.0.0"]
+build-backend = "maturin"
+
+[project]
+name = "deepagents-durable"
+version = "0.0.1"
+description = "Experimental durable runtime for Deep Agents: the agent loop as durable tasks over a Rust kernel, with no graph execution."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "deepagents",
+]
+
+[tool.maturin]
+manifest-path = "crates/python/Cargo.toml"
+module-name = "deepagents_durable._core"
+python-source = "python"
+
+[tool.uv.sources]
+deepagents = { path = "../deepagents", editable = true }
+
+[tool.ty.environment]
+# The editable `deepagents` install is an import hook type checkers cannot follow.
+extra-paths = ["../deepagents"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",  # Trailing comma missing — conflicts with the ruff formatter
+    "ISC001",  # Implicit string concatenation on one line — conflicts with the ruff formatter
+    "PERF203", # `try`-`except` within a loop — incurs overhead only when exceptions are common
+    "SLF001",  # Access to a private member of an external class
+    "PLR0913", # Too many arguments to function definition
+    "PLC0414", # Import alias does not rename original package — conflicts with type-checker re-export conventions
+]
+
+[tool.ruff.lint.flake8-annotations]
+allow-star-arg-any = true
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["deepagents_durable"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+ignore-var-parameters = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN001", "ANN201", "ANN202", "ARG002", "D1", "PLR2004", "PT018", "S101"]
+# Benchmarks and the suite plugin are standalone scripts that print their results.
+"bench/**" = ["INP001", "T201", "D101", "D102", "D103"]
+"compat/**" = ["INP001"]
+# The stub mirrors the Rust extension's API: its exception and parameter names, and its module docstring.
+"**/*.pyi" = ["A002", "N818", "PYI021"]
+
+[dependency-groups]
+bench = [
+    "langgraph-checkpoint-sqlite>=3.1.1",
+]
+compat = [
+    "av>=18.1.0",
+    "langchain-openai>=1.6.7",
+    "langchain-tests>=1.1.9",
+    "pillow>=12.3.0",
+    "pytest-benchmark>=5.3.0",
+    "pytest-codspeed>=5.0.3",
+    "pytest-cov>=7.1.0",
+    "pytest-socket>=0.8.1",
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
+]
+test = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-timeout>=2.4.0",
+    "ruff>=0.15.22,<0.16.0",
+    "ty>=0.0.62,<1.0.0",
+]

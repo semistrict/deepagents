@@ -56,6 +56,7 @@ if TYPE_CHECKING:
 
     from deepagents.backends.composite import CompositeBackend
     from deepagents.backends.protocol import SandboxBackendProtocol
+    from deepagents.middleware.subagents import AgentFactory
 
     EnvironmentContext = Callable[
         [Mapping[str, str] | None], AbstractContextManager[None]
@@ -335,12 +336,14 @@ async def _make_graphs(
     config_override: ServerConfig | None = None,
     project_context_override: ProjectContext | None = None,
     sandbox_backend_override: SandboxBackendProtocol | None = None,
+    agent_factory: AgentFactory | None = None,
 ) -> ServerRuntime:
     """Create the agent graph and the backend carrying its shared resources.
 
     Reads `DEEPAGENTS_CODE_SERVER_*` env vars via `ServerConfig.from_env()`
     (the inverse of `ServerConfig.to_env()` used by the app process), resolves a
-    model, assembles tools, and compiles the agent graph.
+    model, assembles tools, and compiles the agent graph. With `agent_factory`
+    the agent is built by that factory instead (see `create_cli_agent`).
 
     Returns:
         The agent graph, its configured composite backend, and the server-owned
@@ -403,6 +406,7 @@ async def _make_graphs(
             workspace_env=workspace_env,
             workspace_credentials=workspace_credentials,
             sandbox_backend_override=sandbox_backend_override,
+            agent_factory=agent_factory,
         )
 
 
@@ -413,6 +417,7 @@ async def _make_graphs_in_environment(
     workspace_env: Mapping[str, str],
     workspace_credentials: CredentialsSnapshot,
     sandbox_backend_override: SandboxBackendProtocol | None = None,
+    agent_factory: AgentFactory | None = None,
 ) -> ServerRuntime:
     """Build one runtime while its immutable workspace environment is active.
 
@@ -590,6 +595,7 @@ async def _make_graphs_in_environment(
             credentials_snapshot=workspace_credentials,
             model_result=result,
             profile_overrides=config.profile_overrides,
+            agent_factory=agent_factory,
         )
         from deepagents_code.offload_middleware import offload_operation_from
 

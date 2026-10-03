@@ -1,0 +1,4 @@
+[toolchain]
+# 1.97 strips release dylibs into files macOS 27 dyld rejects; 1.99 does not.
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]

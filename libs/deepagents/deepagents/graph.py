@@ -54,6 +54,7 @@ from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from deepagents.middleware.subagents import (
     GENERAL_PURPOSE_SUBAGENT,
+    AgentFactory,
     CompiledSubAgent,
     SubAgent,
     SubAgentMiddleware,
@@ -289,6 +290,7 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
     debug: bool = False,
     name: str | None = None,
     cache: BaseCache | None = None,
+    agent_factory: AgentFactory | None = None,
 ) -> CompiledStateGraph[AgentState[ResponseT], ContextT, InputAgentState, OutputAgentState[ResponseT]]:  # ty: ignore[invalid-type-arguments]  # ty can't verify generic TypedDicts satisfy StateLike bound
     r"""Create a deep agent.
 
@@ -581,6 +583,14 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
         cache: The cache to use for the agent.
 
             Passed through to [`create_agent`][langchain.agents.create_agent].
+        agent_factory: Builds the agent and its declarative subagents from
+            [`create_agent`][langchain.agents.create_agent]'s arguments.
+
+            !!! warning "Experimental"
+
+                Defaults to `create_agent`. Another factory runs the same
+                middleware stack on a different runtime and returns that
+                runtime's agent type; it may change without notice.
 
     Returns:
         A configured deep agent.
@@ -896,6 +906,7 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
             # template. Stale keys silently no-op if the tool is renamed.
             task_description=_profile.tool_description_overrides.get("task"),
             state_schema=state_schema,
+            agent_factory=agent_factory,
         )
         deepagent_middleware.append(sub_agent_middleware)
     deepagent_middleware.extend(
@@ -977,7 +988,7 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
         required_names=_REQUIRED_MIDDLEWARE_NAMES,
     )
 
-    return create_agent(
+    return (agent_factory or create_agent)(
         model,
         system_prompt=final_system_prompt,
         tools=_tools,
