@@ -65,7 +65,11 @@ impl PyHandler {
     }
 
     /// Schedule `method(*args)` on the handler's loop; returns its future and the result channel.
-    fn schedule(&self, method: &str, args: impl for<'py> FnOnce(Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>>) -> Result<(Py<PyAny>, oneshot::Receiver<Outcome>), HandlerError> {
+    fn schedule(
+        &self,
+        method: &str,
+        args: impl for<'py> FnOnce(Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>>,
+    ) -> Result<(Py<PyAny>, oneshot::Receiver<Outcome>), HandlerError> {
         Python::attach(|py| {
             let coroutine = self.handler.bind(py).call_method1(method, args(py)?)?;
             let asyncio = py.import("asyncio")?;

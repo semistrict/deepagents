@@ -79,9 +79,9 @@ pub(super) fn materialize(conn: &Connection, record: DocRecord, at: Option<Seq>)
          WHERE document_id = ?1 AND seq > ?2 AND seq <= ?3 ORDER BY seq",
     )?;
     let mut deltas_since_base = 0;
-    for revision in tail.query_map(params![id, base_seq, upper], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, decode::<Vec<Op>>(row, 2)?))
-    })? {
+    for revision in
+        tail.query_map(params![id, base_seq, upper], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, decode::<Vec<Op>>(row, 2)?)))?
+    {
         let (kind, revision_version, ops) = revision?;
         if kind != "delta" || revision_version != version {
             return Err(Error::Corrupt(format!("document {id} crosses a stored version boundary without a base")));
@@ -112,16 +112,16 @@ pub(super) fn put(tx: &Transaction, seq: Seq, address: &DocAddress, options: Doc
     if !value.is_object() {
         return Err(invalid(format!("document {} must be a JSON object", address.kind)));
     }
-    let Some(current) = read(tx, address, None)? else { return create(tx, seq, address, options, id, value).map(Some) };
+    let Some(current) = read(tx, address, None)? else {
+        return create(tx, seq, address, options, id, value).map(Some);
+    };
     let ops = delta::diff(&current.value, &value);
     if ops.is_empty() && current.version == options.version {
         return Ok(None);
     }
     let encoded_ops = json(&ops)?;
     let encoded_value = json(&value)?;
-    let rebase = current.version != options.version
-        || current.deltas_since_base + 1 >= BASE_EVERY
-        || encoded_ops.len() >= encoded_value.len();
+    let rebase = current.version != options.version || current.deltas_since_base + 1 >= BASE_EVERY || encoded_ops.len() >= encoded_value.len();
     if rebase {
         revise(tx, &current.record, seq, "base", options.version, &encoded_value)?;
     } else {
@@ -177,10 +177,11 @@ fn revise(tx: &Transaction, record: &DocRecord, seq: Seq, kind: &str, version: i
 }
 
 pub(super) fn retire(tx: &Transaction, seq: Seq, address: &DocAddress) -> Result<Option<DocChange>> {
-    let Some(mut record) = find(tx, address, None)? else { return Ok(None) };
+    let Some(mut record) = find(tx, address, None)? else {
+        return Ok(None);
+    };
     record.retired_at = Some(seq);
-    tx.prepare_cached("UPDATE documents SET retired_at = ?2, record = ?3 WHERE id = ?1")?
-        .execute(params![record.id, seq, json(&record)?])?;
+    tx.prepare_cached("UPDATE documents SET retired_at = ?2, record = ?3 WHERE id = ?1")?.execute(params![record.id, seq, json(&record)?])?;
     if record.current_only() {
         tx.prepare_cached("DELETE FROM document_revisions WHERE document_id = ?1")?.execute([record.id])?;
     }

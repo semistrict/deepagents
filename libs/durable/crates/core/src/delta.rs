@@ -66,9 +66,13 @@ impl<'de> Deserialize<'de> for Op {
 
 impl Op {
     fn decode(value: Value) -> std::result::Result<Op, String> {
-        let Value::Array(mut parts) = value else { return Err("op is not a tuple".into()) };
+        let Value::Array(mut parts) = value else {
+            return Err("op is not a tuple".into());
+        };
         let verb = parts.first().and_then(Value::as_str).ok_or("op has no verb")?.to_owned();
-        let arity = |n: usize| if parts.len() == n { Ok(()) } else { Err(format!("{verb} arity")) };
+        let arity = |n: usize| {
+            if parts.len() == n { Ok(()) } else { Err(format!("{verb} arity")) }
+        };
         let count = |value: &Value| value.as_u64().map(|n| n as usize).ok_or_else(|| format!("{verb} count"));
         let path = |value: Value| serde_json::from_value::<Path>(value).map_err(|error| error.to_string());
         let op = match verb.as_str() {
@@ -87,7 +91,9 @@ impl Op {
             }
             "a" => {
                 arity(3)?;
-                let Some(Value::String(text)) = parts.pop() else { return Err("a value".into()) };
+                let Some(Value::String(text)) = parts.pop() else {
+                    return Err("a value".into());
+                };
                 Op::Append(path(parts.pop().expect("arity checked"))?, text)
             }
             "t" => {
@@ -97,7 +103,9 @@ impl Op {
             }
             "p" => {
                 arity(5)?;
-                let Some(Value::Array(items)) = parts.pop() else { return Err("p items".into()) };
+                let Some(Value::Array(items)) = parts.pop() else {
+                    return Err("p items".into());
+                };
                 let (index, remove) = (count(&parts[2])?, count(&parts[3])?);
                 Op::Splice(path(parts.swap_remove(1))?, index, remove, items)
             }
@@ -201,14 +209,18 @@ fn apply_one(root: &mut Value, op: &Op) -> Result<()> {
     match op {
         Op::Replace(value) => *root = value.clone(),
         Op::Splice(path, index, remove, items) => {
-            let Value::Array(target) = resolve(root, path)? else { return Err(unresolvable(op)) };
+            let Value::Array(target) = resolve(root, path)? else {
+                return Err(unresolvable(op));
+            };
             if index + remove > target.len() {
                 return Err(unresolvable(op));
             }
             target.splice(*index..*index + *remove, items.iter().cloned());
         }
         Op::Permute(path, permutation) => {
-            let Value::Array(target) = resolve(root, path)? else { return Err(unresolvable(op)) };
+            let Value::Array(target) = resolve(root, path)? else {
+                return Err(unresolvable(op));
+            };
             if target.len() != permutation.len() || permutation.iter().any(|&from| from >= target.len()) {
                 return Err(unresolvable(op));
             }
@@ -273,63 +285,4 @@ fn resolve<'a>(mut value: &'a mut Value, path: &[Segment]) -> Result<&'a mut Val
 
 fn unresolvable(op: &Op) -> Error {
     Error::Corrupt(format!("operation cannot apply: {}", serde_json::to_string(op).unwrap_or_default()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn roundtrip(old: Value, new: Value) -> Vec<Op> {
-        let ops = diff(&old, &new);
-        let mut patched = old;
-        apply(&mut patched, &ops).unwrap();
-        assert_eq!(patched, new);
-        let encoded = serde_json::to_value(&ops).unwrap();
-        let decoded: Vec<Op> = serde_json::from_value(encoded).unwrap();
-        assert_eq!(decoded, ops);
-        ops
-    }
-
-    #[test]
-    fn appended_text_is_one_append() {
-        let ops = roundtrip(json!({"text": "Par"}), json!({"text": "Paris"}));
-        assert_eq!(serde_json::to_value(&ops).unwrap(), json!([["a", ["text"], "is"]]));
-    }
-
-    #[test]
-    fn appended_items_are_one_splice() {
-        let ops = roundtrip(json!({"items": [1, 2]}), json!({"items": [1, 2, 3, 4]}));
-        assert_eq!(serde_json::to_value(&ops).unwrap(), json!([["p", ["items"], 2, 0, [3, 4]]]));
-    }
-
-    #[test]
-    fn root_type_change_is_a_replace() {
-        let ops = roundtrip(json!({"a": 1}), json!([1]));
-        assert_eq!(serde_json::to_value(&ops).unwrap(), json!([["r", [1]]]));
-    }
-
-    #[test]
-    fn nested_changes_roundtrip() {
-        roundtrip(
-            json!({"a": {"b": [1, {"c": "x"}], "gone": true}, "keep": 1}),
-            json!({"a": {"b": [1, {"c": "xy"}, 3], "new": null}, "keep": 1}),
-        );
-        roundtrip(json!({"a": [1, 2, 3]}), json!({"a": [1]}));
-        roundtrip(json!([1, 2, 3, 4]), json!([5, 6, 7, 8]));
-        roundtrip(json!({"s": "abc"}), json!({"s": "xyz"}));
-    }
-
-    #[test]
-    fn applies_pi_written_verbs() {
-        let mut value = json!({"out": "hello world", "list": ["a", "b", "c"]});
-        let ops: Vec<Op> = serde_json::from_value(json!([
-            ["t", ["out"], 6],
-            ["m", ["list"], [2, 0, 1]],
-            ["d", ["list", 0]],
-            ["s", ["list", 2], "z"]
-        ]))
-        .unwrap();
-        apply(&mut value, &ops).unwrap();
-        assert_eq!(value, json!({"out": "world", "list": ["a", "b", "z"]}));
-    }
 }

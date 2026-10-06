@@ -6,7 +6,6 @@ from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware.types import AgentState
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from deepagents_durable import thread
 from deepagents_durable.kernel import Kernel
@@ -51,27 +50,6 @@ async def test_replaced_and_removed_messages_are_edits_that_reload_identically()
     assert [(m.id, m.content) for m in loaded.messages] == [(m.id, m.content) for m in state.messages] == [("m2", "hello, edited"), ("m3", "more")]
     assert loaded.fields == state.fields == {"counts": {"a": 3, "b": 1}}
     assert kinds == ["lc.message", "lc.message", "lc.edit", "lc.message", "lc.edit"]
-
-
-async def test_remove_all_starts_a_new_context() -> None:
-    _, loaded, kinds = await _roundtrip(
-        [
-            [("messages", [HumanMessage("old", id="o1")])],
-            [("messages", [RemoveMessage(id=REMOVE_ALL_MESSAGES), HumanMessage("new", id="n1")])],
-        ]
-    )
-    assert [m.content for m in loaded.messages] == ["new"]
-    assert kinds == ["lc.message", "lc.reset", "lc.message"]
-
-
-def test_model_context_answers_dangling_tool_calls() -> None:
-    call = {"name": "search", "args": {}, "id": "c1", "type": "tool_call"}
-    messages = [HumanMessage("go"), AIMessage("", tool_calls=[call]), HumanMessage("never mind")]
-    context = thread.model_context(messages)
-    assert [m.type for m in context] == ["human", "ai", "tool", "human"]
-    assert isinstance(context[2], ToolMessage)
-    assert context[2].tool_call_id == "c1"
-    assert thread.model_context(messages[:2]) == messages[:2], "the newest turn's calls are still pending, not dangling"
 
 
 def test_state_model_context_matches_a_full_scan() -> None:

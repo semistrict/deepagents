@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use durable_core::{
-    ConversationOwner, DocAddress, DocOptions, Fork, ForkPolicy, Frame, Head, History, Id, Mode, Scope, Seq, StoredDoc,
-    StoredEntry, Submission, SubmissionStatus, TaskFilter, TaskState,
+    ConversationOwner, DocAddress, DocOptions, Fork, ForkPolicy, Frame, Head, History, Id, Mode, Scope, Seq, StoredDoc, StoredEntry, Submission,
+    SubmissionStatus, TaskFilter, TaskState,
 };
 use pyo3::exceptions::{PyStopAsyncIteration, PyTypeError};
 use pyo3::prelude::*;
@@ -251,9 +251,7 @@ impl Frames {
         future_into_py(py, async move {
             match frames.lock().await.recv().await {
                 Ok(next) => frame(&next),
-                Err(broadcast::error::RecvError::Lagged(missed)) => {
-                    Err(errors::FramesLagged::new_err(format!("missed {missed} frames")))
-                }
+                Err(broadcast::error::RecvError::Lagged(missed)) => Err(errors::FramesLagged::new_err(format!("missed {missed} frames"))),
                 Err(broadcast::error::RecvError::Closed) => Err(PyStopAsyncIteration::new_err(())),
             }
         })

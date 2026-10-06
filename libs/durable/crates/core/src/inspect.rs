@@ -76,4 +76,3 @@ pub async fn dump(session: &Session) -> Result<Value> {
         "history": history,
     }))
 }
-

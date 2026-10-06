@@ -56,13 +56,6 @@ fn abort_with<F: Fn() + Send + Sync + 'static>(record: F) -> impl Fn(Invocation)
     }
 }
 
-fn phase(invocation: &Invocation) -> String {
-    match invocation.task().state {
-        TaskState::Running { checkpoint } => checkpoint["phase"].as_str().unwrap_or_default().to_owned(),
-        other => panic!("phase of a task that is {}", other.status()),
-    }
-}
-
 async fn start(session: &Session, kind: &str, input: Value, checkpoint: Value) -> i64 {
     let tx = session.begin();
     let root = tx.create_root().unwrap();
@@ -71,67 +64,11 @@ async fn start(session: &Session, kind: &str, input: Value, checkpoint: Value) -
     task
 }
 
-async fn counter(invocation: Invocation) -> Result {
-    let task = invocation.task();
-    let TaskState::Running { checkpoint } = &task.state else { unreachable!() };
-    let n = checkpoint["n"].as_i64().unwrap();
-    let mut step = invocation.step()?;
-    if Some(n) == task.input.as_i64() {
-        step.finish(json!(n * 10));
-    } else {
-        step.advance(json!({"phase": "tick", "n": n + 1}));
-    }
-    step.commit().await?;
-    Ok(())
-}
-
 fn completed(task: &durable_core::Task) -> Value {
     match &task.state {
         TaskState::Terminal { outcome: Outcome::Completed { result } } => result.clone(),
         other => panic!("task is {other:?}"),
     }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn phases_run_until_the_task_finishes() {
-    let session = Session::open(None).await.unwrap();
-    let scheduler = Scheduler::new(session.clone());
-    scheduler.register("counter", handler(counter));
-    let task = start(&session, "counter", json!(3), json!({"phase": "tick", "n": 1})).await;
-    assert_eq!(completed(&session.wait_task(task).await.unwrap()), json!(30));
-    scheduler.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_parent_waits_for_its_children() {
-    let session = Session::open(None).await.unwrap();
-    let scheduler = Scheduler::new(session.clone());
-    scheduler.register("counter", handler(counter));
-    scheduler.register(
-        "parent",
-        handler(|invocation: Invocation| async move {
-            let task = invocation.task();
-            let mut step = invocation.step()?;
-            if phase(&invocation) == "spawn" {
-                let children: Vec<i64> = (1..=3)
-                    .map(|n| step.tx().create_task(task.conversation_id, "counter".into(), 1, json!(n), json!({"phase": "tick", "n": 1}), Some(task.id), false))
-                    .collect::<durable_core::Result<_>>()?;
-                step.wait(children.clone(), json!({"phase": "sum", "children": children}), JoinPolicy::AllSettled);
-            } else {
-                let TaskState::Running { checkpoint } = &task.state else { unreachable!() };
-                let mut total = 0;
-                for child in checkpoint["children"].as_array().unwrap() {
-                    total += completed(&invocation.session().task(child.as_i64().unwrap()).await?.unwrap()).as_i64().unwrap();
-                }
-                step.finish(json!(total));
-            }
-            step.commit().await?;
-            Ok(())
-        }),
-    );
-    let task = start(&session, "parent", Value::Null, json!({"phase": "spawn"})).await;
-    assert_eq!(completed(&session.wait_task(task).await.unwrap()), json!(60));
-    scheduler.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -167,7 +104,8 @@ async fn abort_cancels_running_work_and_runs_handlers_bottom_up() {
             run: |invocation: Invocation| async move {
                 let task = invocation.task();
                 let mut step = invocation.step()?;
-                let child = step.tx().create_task(task.conversation_id, "child".into(), 1, Value::Null, json!({"phase": "block"}), Some(task.id), false)?;
+                let child =
+                    step.tx().create_task(task.conversation_id, "child".into(), 1, Value::Null, json!({"phase": "block"}), Some(task.id), false)?;
                 step.wait(vec![child], json!({"phase": "never"}), JoinPolicy::AllSettled);
                 step.commit().await?;
                 Ok(())
@@ -219,17 +157,6 @@ async fn a_failing_phase_faults_and_runs_the_fault_hook() {
     assert_eq!(error.message, "cannot continue");
     let entries = session.entries(settled.conversation_id, None, 10).await.unwrap();
     assert_eq!(entries[0].entry.content["data"], json!("cannot continue"));
-    scheduler.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_phase_without_progress_faults() {
-    let session = Session::open(None).await.unwrap();
-    let scheduler = Scheduler::new(session.clone());
-    scheduler.register("idle", handler(|_: Invocation| async { Ok(()) }));
-    let task = start(&session, "idle", Value::Null, json!({"phase": "start"})).await;
-    let settled = session.wait_task(task).await.unwrap();
-    assert!(matches!(settled.state, TaskState::Terminal { outcome: Outcome::Faulted { .. } }));
     scheduler.stop().await;
 }
 

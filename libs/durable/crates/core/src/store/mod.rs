@@ -15,9 +15,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::batch::{Frame, Write};
 use crate::error::{Error, Result, invalid};
-use crate::records::{
-    Conversation, DocAddress, DocRecord, Id, Scope, Seq, StoredEntry, Submission, SubmissionStatus, Task, TaskState,
-};
+use crate::records::{Conversation, DocAddress, DocRecord, Id, Scope, Seq, StoredEntry, Submission, SubmissionStatus, Task, TaskState};
 
 use reconcile::Graph;
 use rows::{indexed, json, record};
@@ -56,11 +54,8 @@ impl Store {
             None => Connection::open_in_memory()?,
         };
         schema::migrate(&mut conn)?;
-        let (next_id, next_seq): (String, Seq) = conn.query_row(
-            "SELECT next_id, next_seq FROM durable_metadata WHERE singleton = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+        let (next_id, next_seq): (String, Seq) =
+            conn.query_row("SELECT next_id, next_seq FROM durable_metadata WHERE singleton = 1", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
         let next_id = next_id.parse().map_err(|_| Error::Corrupt(format!("next_id {next_id} is not an integer")))?;
         let mut store = Store { conn, next_seq, next_id };
         store.recover()?;
@@ -80,11 +75,7 @@ impl Store {
     /// Running tasks did not survive the last process; they become pending again.
     fn recover(&mut self) -> Result<()> {
         let filter = TaskFilter { status: Some("running".into()), ..TaskFilter::default() };
-        let writes: Vec<Write> = self
-            .tasks(&filter)?
-            .into_iter()
-            .map(|task| Write::Release { id: task.id })
-            .collect();
+        let writes: Vec<Write> = self.tasks(&filter)?.into_iter().map(|task| Write::Release { id: task.id }).collect();
         if !writes.is_empty() {
             self.commit(writes, self.next_id)?;
         }
@@ -241,9 +232,8 @@ impl Store {
 
     /// Submissions of a conversation, optionally with one status, oldest first.
     pub fn submissions(&self, conversation: Id, status: Option<SubmissionStatus>) -> Result<Vec<Submission>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT record FROM submissions WHERE conversation_id = ?1 AND (?2 IS NULL OR status = ?2) ORDER BY id",
-        )?;
+        let mut stmt =
+            self.conn.prepare_cached("SELECT record FROM submissions WHERE conversation_id = ?1 AND (?2 IS NULL OR status = ?2) ORDER BY id")?;
         collect(stmt.query_map(params![conversation, status.map(SubmissionStatus::as_str)], record)?)
     }
 
@@ -274,10 +264,7 @@ impl Store {
             frame.tasks.push(task_by_id(&tx, id)?.expect("changed task exists"));
         }
         let next_id = next_id.max(self.next_id);
-        tx.execute(
-            "UPDATE durable_metadata SET next_id = ?1, next_seq = ?2 WHERE singleton = 1",
-            params![next_id.to_string(), seq + 1],
-        )?;
+        tx.execute("UPDATE durable_metadata SET next_id = ?1, next_seq = ?2 WHERE singleton = 1", params![next_id.to_string(), seq + 1])?;
         tx.commit()?;
         self.next_seq = seq + 1;
         self.next_id = next_id;
@@ -288,7 +275,9 @@ impl Store {
     pub fn reserve(&mut self, kinds: &[String]) -> Result<Option<(Task, Mode, Frame)>> {
         let graph = load_graph(&self.conn)?;
         let candidate = graph.tasks.values().find_map(|task| {
-            let TaskState::Pending { checkpoint } = &task.state else { return None };
+            let TaskState::Pending { checkpoint } = &task.state else {
+                return None;
+            };
             if !kinds.contains(&task.kind) {
                 return None;
             }
@@ -300,7 +289,9 @@ impl Store {
             };
             Some((task.id, checkpoint.clone(), mode))
         });
-        let Some((id, checkpoint, mode)) = candidate else { return Ok(None) };
+        let Some((id, checkpoint, mode)) = candidate else {
+            return Ok(None);
+        };
         let frame = self.commit(vec![Write::TaskState { id, state: TaskState::Running { checkpoint } }], self.next_id)?;
         let task = frame.tasks.iter().find(|task| task.id == id).cloned().expect("reserved task is in its frame");
         Ok(Some((task, mode, frame)))
@@ -317,11 +308,7 @@ enum Visible {
 }
 
 fn lineage_clause(lineage: &[(Id, Id)]) -> String {
-    lineage
-        .iter()
-        .map(|(conversation, cap)| format!("(conversation_id = {conversation} AND id <= {cap})"))
-        .collect::<Vec<_>>()
-        .join(" OR ")
+    lineage.iter().map(|(conversation, cap)| format!("(conversation_id = {conversation} AND id <= {cap})")).collect::<Vec<_>>().join(" OR ")
 }
 
 /// Record an ID's table in the global namespace. Immutable records claim a fresh ID.
@@ -355,13 +342,9 @@ fn apply(tx: &Transaction, seq: Seq, write: Write, frame: &mut Frame, tasks: &mu
             }
             claim(tx, conversation.id, "conversation")?;
             let owner = conversation.owner.as_ref();
-            tx.prepare_cached("INSERT INTO conversations (id, owner_conversation_id, owner_task_id, record) VALUES (?1, ?2, ?3, ?4)")?
-                .execute(params![
-                    conversation.id,
-                    owner.map(|owner| owner.conversation_id),
-                    owner.map(|owner| owner.task_id),
-                    json(&conversation)?
-                ])?;
+            tx.prepare_cached("INSERT INTO conversations (id, owner_conversation_id, owner_task_id, record) VALUES (?1, ?2, ?3, ?4)")?.execute(
+                params![conversation.id, owner.map(|owner| owner.conversation_id), owner.map(|owner| owner.task_id), json(&conversation)?],
+            )?;
             frame.conversations.push(conversation);
         }
         Write::Entry(entry) => {
@@ -463,9 +446,7 @@ fn check_transition(tx: &Transaction, task: &Task, next: &TaskState) -> Result<(
             }
             Ok(())
         }
-        TaskState::Pending { .. } | TaskState::Completing { .. } => {
-            Err(invalid(format!("task {id} cannot move itself to {}", next.status())))
-        }
+        TaskState::Pending { .. } | TaskState::Completing { .. } => Err(invalid(format!("task {id} cannot move itself to {}", next.status()))),
     }
 }
 

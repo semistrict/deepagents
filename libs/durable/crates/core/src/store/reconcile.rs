@@ -23,10 +23,7 @@ impl Graph {
     pub fn reconcile(&mut self) -> BTreeSet<Id> {
         let mut changed = BTreeSet::new();
         loop {
-            let round = self.cascade_aborts()
-                + self.fail_fast()
-                + self.release_waits()
-                + self.finish_holds();
+            let round = self.cascade_aborts() + self.fail_fast() + self.release_waits() + self.finish_holds();
             if round.is_empty() {
                 return changed;
             }
@@ -51,7 +48,9 @@ impl Graph {
     fn cancelled_above(&self, task: &Task) -> bool {
         let mut owner = self.owner_of(task);
         while let Some(id) = owner {
-            let Some(above) = self.tasks.get(&id).filter(|above| above.state.live()) else { return false };
+            let Some(above) = self.tasks.get(&id).filter(|above| above.state.live()) else {
+                return false;
+            };
             if Self::cancels(above) {
                 return true;
             }
@@ -68,32 +67,28 @@ impl Graph {
     pub fn has_owned_work(&self, owner: Id) -> bool {
         self.live().any(|task| {
             task.owner == Some(owner)
-                || (task.owner.is_none()
-                    && !task.background
-                    && self.conversation_owner.get(&task.conversation_id).copied().flatten() == Some(owner))
+                || (task.owner.is_none() && !task.background && self.conversation_owner.get(&task.conversation_id).copied().flatten() == Some(owner))
         })
     }
 
     fn cascade_aborts(&mut self) -> Round {
-        let marked: Vec<Id> = self
-            .live()
-            .filter(|task| !task.abort_requested && !task.background && self.cancelled_above(task))
-            .map(|task| task.id)
-            .collect();
+        let marked: Vec<Id> =
+            self.live().filter(|task| !task.abort_requested && !task.background && self.cancelled_above(task)).map(|task| task.id).collect();
         self.mark(marked)
     }
 
     fn fail_fast(&mut self) -> Round {
         let mut marked = Vec::new();
         for task in self.live() {
-            let TaskState::Waiting { on, policy: JoinPolicy::FailFast, .. } = &task.state else { continue };
-            let failed = on.iter().any(|id| {
-                self.tasks.get(id).and_then(|other| other.state.outcome()).is_some_and(|outcome| !outcome.completed())
-            });
+            let TaskState::Waiting { on, policy: JoinPolicy::FailFast, .. } = &task.state else {
+                continue;
+            };
+            let failed = on.iter().any(|id| self.tasks.get(id).and_then(|other| other.state.outcome()).is_some_and(|outcome| !outcome.completed()));
             if failed {
                 marked.extend(on.iter().filter(|id| {
                     self.tasks.get(id).is_some_and(|other| {
-                        !other.abort_requested && matches!(other.state, TaskState::Pending { .. } | TaskState::Running { .. } | TaskState::Waiting { .. })
+                        !other.abort_requested
+                            && matches!(other.state, TaskState::Pending { .. } | TaskState::Running { .. } | TaskState::Waiting { .. })
                     })
                 }));
             }
@@ -256,7 +251,11 @@ mod tests {
     fn fail_fast_wait_aborts_siblings_then_releases() {
         let waiting = TaskState::Waiting { checkpoint: json!({"phase": "decide"}), on: vec![2, 3], policy: JoinPolicy::FailFast };
         let parent = task(1, None, waiting);
-        let failed = task(2, Some(1), TaskState::Terminal { outcome: Outcome::Failed { error: OutcomeError { message: "declined".into(), detail: None }, result: None } });
+        let failed = task(
+            2,
+            Some(1),
+            TaskState::Terminal { outcome: Outcome::Failed { error: OutcomeError { message: "declined".into(), detail: None }, result: None } },
+        );
         let other = task(3, Some(1), running());
         let mut graph = graph(vec![parent, failed, other], &[]);
 

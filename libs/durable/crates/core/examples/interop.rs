@@ -7,8 +7,7 @@
 use std::path::PathBuf;
 
 use durable_core::{
-    ConversationOwner, DocAddress, DocOptions, Fork, ForkPolicy, Head, History, Id, Outcome, Scope, Session, SubmissionStatus,
-    TaskState,
+    ConversationOwner, DocAddress, DocOptions, Fork, ForkPolicy, Head, History, Id, Outcome, Scope, Session, SubmissionStatus, TaskState,
 };
 use serde_json::{Map, Value, json};
 
@@ -21,11 +20,8 @@ fn content(pairs: Value) -> Map<String, Value> {
 
 /// The scenario `interop.ts write` produces, written with this core.
 async fn write(session: &Session) -> durable_core::Result<()> {
-    let notes = |conversation: Id| DocAddress {
-        kind: "interop.notes".into(),
-        scope: Scope::Conversation { conversation_id: conversation },
-        key: None,
-    };
+    let notes =
+        |conversation: Id| DocAddress { kind: "interop.notes".into(), scope: Scope::Conversation { conversation_id: conversation }, key: None };
     let rewindable = DocOptions { version: 1, history: Some(History::Rewindable), fork: Some(ForkPolicy::AsOf) };
     let settings = DocAddress { kind: "interop.settings".into(), scope: Scope::Session, key: None };
 

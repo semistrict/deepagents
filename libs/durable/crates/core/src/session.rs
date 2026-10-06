@@ -19,8 +19,8 @@ use tokio::sync::{Mutex as Line, OwnedMutexGuard, broadcast, oneshot};
 use crate::batch::{Frame, Write};
 use crate::error::{Error, Result, invalid};
 use crate::records::{
-    Conversation, ConversationOwner, DocAddress, DocOptions, DocRecord, Entry, Fork, Head, Id, ROOT_CONVERSATION, Scope, Seq,
-    StoredEntry, Submission, SubmissionStatus, Task, TaskState,
+    Conversation, ConversationOwner, DocAddress, DocOptions, DocRecord, Entry, Fork, Head, Id, ROOT_CONVERSATION, Scope, Seq, StoredEntry,
+    Submission, SubmissionStatus, Task, TaskState,
 };
 use crate::store::{Mode, Store, StoredDoc, TaskFilter};
 
@@ -452,14 +452,7 @@ impl Tx {
     }
 
     /// Append an entry. `content` holds `model`, `data`, `edits`, or other fields.
-    pub fn append_entry(
-        &self,
-        conversation: Id,
-        kind: String,
-        content: Map<String, Value>,
-        head: Option<Head>,
-        by_task: Option<Id>,
-    ) -> Result<Id> {
+    pub fn append_entry(&self, conversation: Id, kind: String, content: Map<String, Value>, head: Option<Head>, by_task: Option<Id>) -> Result<Id> {
         let id = self.mint();
         let head = head.map(|head| match head {
             Head::SelfEntry => id,

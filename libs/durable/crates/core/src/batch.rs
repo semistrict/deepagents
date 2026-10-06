@@ -11,24 +11,41 @@ use crate::records::{Conversation, DocAddress, DocOptions, DocRecord, Entry, Id,
 pub enum Write {
     /// Fail the whole batch with `InvocationEnded` unless `task` is running
     /// (and, with `unmarked`, has no abort mark). Writes nothing.
-    Require { task: Id, unmarked: bool },
+    Require {
+        task: Id,
+        unmarked: bool,
+    },
     Conversation(Conversation),
     Entry(Entry),
     Task(Task),
     /// A task replaces its own state. A terminal state is held while owned work is live.
-    TaskState { id: Id, state: TaskState },
+    TaskState {
+        id: Id,
+        state: TaskState,
+    },
     /// The scheduler ends a running task's invocation without progress: it becomes
     /// pending at its checkpoint, keeping its abort mark and memos.
-    Release { id: Id },
+    Release {
+        id: Id,
+    },
     /// Mark a live task for abort; the mark cascades to its owned work.
-    Abort { id: Id },
+    Abort {
+        id: Id,
+    },
     /// Insert or replace a submission.
     Submission(Submission),
     /// Replace a document's value. With no current incarnation at the address,
     /// creates incarnation `id` with `options`.
-    Doc { address: DocAddress, options: DocOptions, id: Id, value: Value },
+    Doc {
+        address: DocAddress,
+        options: DocOptions,
+        id: Id,
+        value: Value,
+    },
     /// Retire a document's current incarnation.
-    Retire { address: DocAddress },
+    Retire {
+        address: DocAddress,
+    },
 }
 
 /// The committed result of one batch, published to observers in commit order.
@@ -45,11 +62,7 @@ pub struct Frame {
 
 impl Frame {
     pub fn is_empty(&self) -> bool {
-        self.conversations.is_empty()
-            && self.entries.is_empty()
-            && self.tasks.is_empty()
-            && self.submissions.is_empty()
-            && self.docs.is_empty()
+        self.conversations.is_empty() && self.entries.is_empty() && self.tasks.is_empty() && self.submissions.is_empty() && self.docs.is_empty()
     }
 }
 
@@ -65,8 +78,12 @@ pub struct DocChange {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Change {
     /// A new incarnation with this value.
-    Created { value: Value },
+    Created {
+        value: Value,
+    },
     /// Operations that turn the previous value into the new one.
-    Updated { ops: Vec<Op> },
+    Updated {
+        ops: Vec<Op>,
+    },
     Retired,
 }
