@@ -1,8 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/python"]
+members = ["crates/core", "crates/python", "crates/wasm"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 
+# The WebAssembly kernel: Workers cap a script's size.
+[profile.wasm]
+inherits = "release"
+lto = true
+opt-level = "s"

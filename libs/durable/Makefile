@@ -6,10 +6,20 @@
 PI_NODE = node --conditions=source --experimental-strip-types interop/interop.ts
 FIXTURES = crates/core/tests/fixtures
 
-.PHONY: test interop pi-fixture
+.PHONY: test wasm interop pi-fixture
 
 test:
 	cargo nextest run -p durable-core
+
+# The kernel for JavaScript hosts, as an npm package in crates/wasm/pkg (and
+# its tarball there). Needs wasm-pack and a clang that targets wasm32, which
+# compiles SQLite. The toolchain's llvm-ar archives it: other archivers write
+# indexes rust-lld cannot read for wasm objects.
+wasm: HOST = $(shell rustc -vV | sed -n 's/^host: //p')
+wasm:
+	AR_wasm32_unknown_unknown="$$(rustc --print sysroot)/lib/rustlib/$(HOST)/bin/llvm-ar" \
+		wasm-pack build crates/wasm --target web --weak-refs --out-name durable --profile wasm
+	wasm-pack pack crates/wasm/pkg
 
 # Each implementation reads files written by the other exactly as their writer reads them.
 interop:
