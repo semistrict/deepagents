@@ -1,118 +1,32 @@
 //! The asynchronous session: one storage, one mutation line, published frames.
 //!
-//! SQLite runs on a dedicated thread. Reads go straight to it. Writes go
-//! through a [`Tx`], which takes the mutation line at its first read, or at
-//! commit if it only writes, and holds it until it commits or is dropped, so
-//! a commit sees exactly the state its reads saw. Committed frames are
-//! broadcast in commit order.
+//! Reads go straight to the storage (see [`Db`]). Writes go through a
+//! [`Tx`], which takes the mutation line at its first read, or at commit if
+//! it only writes, and holds it until it commits or is dropped, so a commit
+//! sees exactly the state its reads saw. Committed frames are broadcast in
+//! commit order.
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions, TryLockError};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
 
 use serde_json::{Map, Value};
-use tokio::sync::{Mutex as Line, OwnedMutexGuard, broadcast, oneshot};
+use tokio::sync::{Mutex as Line, OwnedMutexGuard, broadcast};
 
 use crate::batch::{Frame, Write};
+use crate::db::Db;
 use crate::error::{Error, Result, invalid};
 use crate::records::{
     Conversation, ConversationOwner, DocAddress, DocOptions, DocRecord, Entry, Fork, Head, Id, ROOT_CONVERSATION, Scope, Seq, StoredEntry,
     Submission, SubmissionStatus, Task, TaskState,
 };
-use crate::store::{Mode, Store, StoredDoc, TaskFilter};
+#[cfg(js)]
+use crate::store::Store;
+use crate::store::{Mode, StoredDoc, TaskFilter};
 
 /// Frames a slow observer may fall behind before it must resynchronize.
 const FRAME_BACKLOG: usize = 1024;
-
-type Job = Box<dyn FnOnce(&mut Store) + Send>;
-
-/// The storage thread. Closing drops the job sender, so the thread drains
-/// queued jobs, closes SQLite, and exits.
-struct Db {
-    jobs: Mutex<Option<std::sync::mpsc::Sender<Job>>>,
-    thread: Mutex<Option<thread::JoinHandle<()>>>,
-}
-
-/// Hold the exclusive lock of a session file: `<file>.lock`, beside SQLite's own files.
-///
-/// A session has one owner. The owner allocates IDs and sequence numbers in
-/// memory and keeps committed state warm, so a second process writing the
-/// same file would corrupt it.
-fn lock(path: &Path) -> Result<File> {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".lock");
-    let file = OpenOptions::new().create(true).truncate(false).write(true).open(PathBuf::from(name))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => Err(Error::Locked(path.display().to_string())),
-        Err(TryLockError::Error(error)) => Err(error.into()),
-    }
-}
-
-impl Db {
-    fn spawn(path: Option<PathBuf>) -> Result<Db> {
-        let (jobs, inbox) = std::sync::mpsc::channel::<Job>();
-        let (opened, ready) = std::sync::mpsc::channel();
-        let thread = thread::Builder::new()
-            .name("durable-store".into())
-            .spawn(move || {
-                let opening = path.as_deref().map(lock).transpose().and_then(|held| Ok((held, Store::open(path.as_deref())?)));
-                // The lock is released only after SQLite has closed.
-                let (_held, mut store) = match opening {
-                    Ok(opened) => opened,
-                    Err(error) => {
-                        let _ = opened.send(Err(error));
-                        return;
-                    }
-                };
-                let _ = opened.send(Ok(()));
-                for job in inbox {
-                    job(&mut store);
-                }
-                drop(store);
-            })
-            .map_err(|error| Error::Corrupt(format!("cannot start the storage thread: {error}")))?;
-        ready.recv().map_err(|_| Error::Closed)??;
-        Ok(Db { jobs: Mutex::new(Some(jobs)), thread: Mutex::new(Some(thread)) })
-    }
-
-    async fn call<R: Send + 'static>(&self, job: impl FnOnce(&mut Store) -> Result<R> + Send + 'static) -> Result<R> {
-        let (reply, result) = oneshot::channel();
-        let job: Job = Box::new(move |store| {
-            let _ = reply.send(job(store));
-        });
-        self.send(job)?;
-        result.await.map_err(|_| Error::Closed)?
-    }
-
-    fn send(&self, job: Job) -> Result<()> {
-        let jobs = self.jobs.lock().expect("job sender lock poisoned");
-        jobs.as_ref().ok_or(Error::Closed)?.send(job).map_err(|_| Error::Closed)
-    }
-
-    /// Stop accepting jobs and wait until the storage thread has closed SQLite.
-    async fn close(&self) {
-        self.jobs.lock().expect("job sender lock poisoned").take();
-        let thread = self.thread.lock().expect("thread lock poisoned").take();
-        if let Some(thread) = thread {
-            // A panicked storage thread has nothing left to close.
-            let _ = tokio::task::spawn_blocking(move || thread.join()).await;
-        }
-    }
-}
-
-impl Drop for Db {
-    /// A session dropped without closing still closes SQLite and releases its file before it is gone.
-    fn drop(&mut self) {
-        self.jobs.get_mut().expect("job sender lock poisoned").take();
-        if let Some(thread) = self.thread.get_mut().expect("thread lock poisoned").take() {
-            let _ = thread.join();
-        }
-    }
-}
 
 struct Inner {
     db: Db,
@@ -137,7 +51,7 @@ macro_rules! read {
 impl Session {
     /// Open a session over a database file, or an in-memory database without a path.
     pub async fn open(path: Option<PathBuf>) -> Result<Session> {
-        let db = tokio::task::spawn_blocking(move || Db::spawn(path)).await.map_err(|_| Error::Closed)??;
+        let db = Db::open(path).await?;
         let next_id = db.call(|store| Ok(store.next_id())).await?;
         let (frames, _) = broadcast::channel(FRAME_BACKLOG);
         let inner = Inner { db, line: Arc::new(Line::new(())), next_id: AtomicI64::new(next_id), frames: Mutex::new(Some(frames)) };
@@ -174,6 +88,13 @@ impl Session {
             self.publish(frame);
             (task, mode)
         }))
+    }
+
+    /// Read committed state now. In a JavaScript host storage is inline, so
+    /// reads are plain calls rather than futures.
+    #[cfg(js)]
+    pub fn read_now<R>(&self, read: impl FnOnce(&Store) -> Result<R>) -> Result<R> {
+        self.inner.db.now(|store| read(store))
     }
 
     fn publish(&self, frame: Frame) -> Arc<Frame> {
@@ -429,13 +350,49 @@ impl Tx {
 
     /// A document's value as this transaction would leave it.
     pub async fn doc(&self, address: DocAddress) -> Result<Option<Value>> {
+        self.hold().await?;
+        match self.pending_doc(&address)? {
+            Some(value) => Ok(value),
+            None => Ok(self.inner.db.call(move |store| store.doc(&address, None)).await?.map(|stored| stored.value)),
+        }
+    }
+
+    /// A document's value as this transaction left it, if it touched the document.
+    fn pending_doc(&self, address: &DocAddress) -> Result<Option<Option<Value>>> {
+        self.with(|state| Ok(state.docs.get(address).map(|work| work.value.as_ref().map(|(_, value)| value.clone()))))
+    }
+
+    /// Take the mutation line now, waiting only while another transaction holds it.
+    /// Reads and the commit then never wait for the line.
+    pub async fn hold(&self) -> Result<()> {
         if self.with(|state| Ok(state.line.is_none()))? {
             self.hold_line().await?;
         }
-        let pending = self.with(|state| Ok(state.docs.get(&address).map(|work| work.value.as_ref().map(|(_, value)| value.clone()))))?;
-        match pending {
+        Ok(())
+    }
+
+    /// Fail unless this transaction holds the line, which its synchronous calls need.
+    #[cfg(js)]
+    fn held(&self) -> Result<()> {
+        self.with(|state| if state.line.is_some() { Ok(()) } else { Err(invalid("the transaction does not hold the line; hold() it first")) })
+    }
+
+    /// Read committed state now, in a transaction that holds the line. Like any
+    /// table read, it must come before the transaction's first table write.
+    #[cfg(js)]
+    pub fn read_now<R>(&self, read: impl FnOnce(&Store) -> Result<R>) -> Result<R> {
+        self.held()?;
+        self.with(|state| if state.wrote_tables { Err(Error::ReadAfterWrite) } else { Ok(()) })?;
+        self.inner.db.now(|store| read(store))
+    }
+
+    /// [`Tx::doc`] now, in a transaction that holds the line.
+    #[cfg(js)]
+    pub fn doc_now(&self, address: DocAddress) -> Result<Option<Value>> {
+        self.held()?;
+        match self.pending_doc(&address)? {
             Some(value) => Ok(value),
-            None => Ok(self.inner.db.call(move |store| store.doc(&address, None)).await?.map(|stored| stored.value)),
+            None => Ok(self.inner.db.now(|store| store.doc(&address, None))?.map(|stored| stored.value)),
         }
     }
 
@@ -536,12 +493,28 @@ impl Tx {
 
     /// Commit atomically and publish the frame. The line is released afterwards.
     pub async fn commit(&self) -> Result<Arc<Frame>> {
+        self.hold().await?;
+        let (line, writes) = self.finish()?;
+        let next_id = self.inner.next_id.load(Ordering::SeqCst);
+        let frame = self.inner.db.call(move |store| store.commit(writes, next_id)).await?;
+        Ok(self.published(frame, line))
+    }
+
+    /// [`Tx::commit`] now, in a transaction that holds the line.
+    #[cfg(js)]
+    pub fn commit_now(&self) -> Result<Arc<Frame>> {
+        self.held()?;
+        let (line, writes) = self.finish()?;
+        let next_id = self.inner.next_id.load(Ordering::SeqCst);
+        let frame = self.inner.db.now(|store| store.commit(writes, next_id))?;
+        Ok(self.published(frame, line))
+    }
+
+    /// End the transaction: its line, and its writes with each touched document's last fate.
+    fn finish(&self) -> Result<(OwnedMutexGuard<()>, Vec<Write>)> {
         let state = self.state.lock().expect("transaction lock poisoned").take().ok_or(Error::Finished)?;
         let TxState { line, mut writes, mut docs, doc_order, .. } = state;
-        let line = match line {
-            Some(line) => line,
-            None => self.inner.line.clone().lock_owned().await,
-        };
+        let line = line.expect("a committing transaction holds the line");
         for address in doc_order {
             let work = docs.remove(&address).expect("ordered address has work");
             if work.retire {
@@ -551,11 +524,14 @@ impl Tx {
                 writes.push(Write::Doc { address, options, id: self.mint(), value });
             }
         }
-        let next_id = self.inner.next_id.load(Ordering::SeqCst);
-        let frame = self.inner.db.call(move |store| store.commit(writes, next_id)).await?;
+        Ok((line, writes))
+    }
+
+    /// Publish a committed frame, then release the line.
+    fn published(&self, frame: Frame, line: OwnedMutexGuard<()>) -> Arc<Frame> {
         let frame = Session { inner: self.inner.clone() }.publish(frame);
         drop(line);
-        Ok(frame)
+        frame
     }
 
     /// Abandon the transaction without writing. Dropping does the same.

@@ -14,22 +14,20 @@
 //! asyncio) forward the signal to their own cancellation.
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::Value;
 use tokio::sync::{Notify, broadcast, watch};
-use tokio::task::JoinHandle;
 
 use crate::batch::Frame;
 use crate::error::{Error, Result};
 use crate::records::{Id, JoinPolicy, Outcome, OutcomeError, Task, TaskState};
+use crate::rt::{MaybeSend, MaybeSync, Spawned, spawn};
 use crate::session::{Session, Tx};
 use crate::store::Mode;
 
-pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+pub use crate::rt::BoxFuture;
 
 /// Why a handler stopped without finishing its phase normally.
 #[derive(Debug)]
@@ -52,7 +50,7 @@ impl From<Error> for HandlerError {
 }
 
 /// The code behind one task kind.
-pub trait TaskHandler: Send + Sync + 'static {
+pub trait TaskHandler: MaybeSend + MaybeSync + 'static {
     /// Run the phase named by the invocation's checkpoint. It must commit progress
     /// through [`Invocation::step`] before returning.
     fn run(&self, invocation: Invocation) -> BoxFuture<std::result::Result<(), HandlerError>>;
@@ -152,17 +150,39 @@ impl Step {
         self.state = Some(TaskState::Terminal { outcome: Outcome::Aborted { reason, result: None } });
     }
 
+    /// Take the mutation line now; see [`Tx::hold`].
+    pub async fn hold(&self) -> Result<()> {
+        self.tx.hold().await
+    }
+
     /// Commit the writes and the new state atomically.
-    pub async fn commit(self) -> Result<Arc<Frame>> {
-        let id = self.task.id;
-        if let Some(state) = self.state {
-            self.tx.set_task_state(id, state)?;
-        }
+    pub async fn commit(mut self) -> Result<Arc<Frame>> {
+        self.stage()?;
         let frame = self.tx.commit().await?;
-        if let Some(task) = frame.tasks.iter().find(|task| task.id == id) {
+        Ok(self.committed(frame))
+    }
+
+    /// [`Step::commit`] now, in a step that holds the line.
+    #[cfg(js)]
+    pub fn commit_now(mut self) -> Result<Arc<Frame>> {
+        self.stage()?;
+        let frame = self.tx.commit_now()?;
+        Ok(self.committed(frame))
+    }
+
+    fn stage(&mut self) -> Result<()> {
+        match self.state.take() {
+            Some(state) => self.tx.set_task_state(self.task.id, state),
+            None => Ok(()),
+        }
+    }
+
+    /// Remember the task as this commit left it, for the invocation's next step.
+    fn committed(&self, frame: Arc<Frame>) -> Arc<Frame> {
+        if let Some(task) = frame.tasks.iter().find(|task| task.id == self.task.id) {
             *self.owner.lock().expect("task lock poisoned") = task.clone();
         }
-        Ok(frame)
+        frame
     }
 
     pub fn rollback(&self) {
@@ -173,20 +193,22 @@ impl Step {
 struct Running {
     mode: Mode,
     cancel: watch::Sender<bool>,
-    join: JoinHandle<()>,
+    join: Spawned,
 }
 
-/// Reserves and runs tasks of registered kinds on the current tokio runtime.
+/// Reserves and runs tasks of registered kinds on the host's executor.
 pub struct Scheduler {
     session: Session,
     handlers: RwLock<HashMap<String, Arc<dyn TaskHandler>>>,
     running: Mutex<HashMap<Id, Running>>,
     wake: Notify,
     closing: AtomicBool,
-    loops: Mutex<Vec<JoinHandle<()>>>,
+    loops: Mutex<Vec<Spawned>>,
 }
 
 impl Scheduler {
+    // In a JavaScript host the scheduler holds JavaScript handlers and never crosses threads.
+    #[cfg_attr(js, allow(clippy::arc_with_non_send_sync))]
     pub fn new(session: Session) -> Arc<Scheduler> {
         Arc::new(Scheduler {
             session,
@@ -199,13 +221,14 @@ impl Scheduler {
     }
 
     /// Run tasks of `kind` with `handler`; a later registration replaces an earlier one.
-    /// The first registration starts the scheduler on the current tokio runtime.
+    /// The first registration starts the scheduler on the host's executor: the current
+    /// tokio runtime, or the JavaScript event loop.
     pub fn register(self: &Arc<Self>, kind: impl Into<String>, handler: Arc<dyn TaskHandler>) {
         self.handlers.write().expect("handlers lock poisoned").insert(kind.into(), handler);
         let mut loops = self.loops.lock().expect("loops lock poisoned");
         if loops.is_empty() {
-            loops.push(tokio::spawn(self.clone().reserve_loop()));
-            loops.push(tokio::spawn(self.clone().watch_loop(self.session.subscribe())));
+            loops.push(spawn(self.clone().reserve_loop()));
+            loops.push(spawn(self.clone().watch_loop(self.session.subscribe())));
         }
         self.wake.notify_one();
     }
@@ -221,7 +244,7 @@ impl Scheduler {
             let _ = invocation.cancel.send(true);
         }
         for invocation in running {
-            let _ = invocation.join.await;
+            invocation.join.finished().await;
         }
     }
 
@@ -252,7 +275,7 @@ impl Scheduler {
         let invocation = Invocation { session: self.session.clone(), task: Arc::new(Mutex::new(task)), mode, cancel: cancelled };
         // Hold the map lock across the spawn so the invocation cannot finish before it is listed.
         let mut running = self.running.lock().expect("running lock poisoned");
-        let join = tokio::spawn(self.clone().invoke(invocation));
+        let join = spawn(self.clone().invoke(invocation));
         running.insert(id, Running { mode, cancel, join });
     }
 

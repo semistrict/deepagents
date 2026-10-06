@@ -88,6 +88,11 @@ const INITIAL_SCHEMA: &[&str] = &[
 const MIGRATIONS: &[&[&str]] = &[INITIAL_SCHEMA];
 
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
+    // A JavaScript host's file system has no shared memory for the WAL index.
+    // The session is the file's one owner, so it keeps the index in its own
+    // memory under an exclusive lock, which SQLite allows without shared memory.
+    #[cfg(js)]
+    conn.pragma_update(None, "locking_mode", "exclusive")?;
     conn.pragma_update(None, "journal_mode", "wal")?;
     conn.pragma_update(None, "synchronous", "normal")?;
     let tx = conn.transaction()?;
