@@ -1,0 +1,70 @@
+# Builds the durable kernel for JavaScript hosts (libs/durable/crates/wasm) as
+# an npm package. Pushing a `durable-wasm-v<version>` tag publishes its tarball
+# as that release's asset, which deepagentsjs depends on by URL.
+
+name: "🦀 Durable Kernel (wasm)"
+
+on:
+  push:
+    tags: ["durable-wasm-v*"]
+  pull_request:
+    paths: ["libs/durable/**", ".github/workflows/durable_wasm.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: "Build"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: libs/durable
+    steps:
+      - name: "📋 Checkout Code"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The Rust toolchain itself comes from libs/durable/rust-toolchain.toml.
+      - name: "📦 Install wasm-pack"
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: wasm-pack
+
+      - name: "🔨 Build"
+        run: make wasm
+
+      - name: "🏷️ Check the tag names the crate's version"
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: test -f "crates/wasm/pkg/durable-wasm-${TAG#durable-wasm-v}.tgz"
+
+      - name: "⬆️ Upload package"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: durable-wasm
+          path: libs/durable/crates/wasm/pkg/durable-wasm-*.tgz
+
+  release:
+    name: "Release"
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: "⬇️ Download package"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: durable-wasm
+
+      - name: "🚀 Publish release"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" durable-wasm-*.tgz --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "The durable kernel for JavaScript hosts, built from ${GITHUB_SHA}."

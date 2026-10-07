@@ -1031,12 +1031,13 @@ SANDBOX_EXTRAS: frozenset[str] = frozenset(
 )
 """Optional extras that add sandbox integrations."""
 
-STANDALONE_EXTRAS: frozenset[str] = frozenset({"media", "quickjs"})
+STANDALONE_EXTRAS: frozenset[str] = frozenset({"durable", "media", "quickjs"})
 """Optional extras that don't fit the provider/sandbox taxonomy.
 
 `quickjs` is a core dependency as of 0.1.24, but the empty extra remains
 installable so older `deepagents-code[quickjs]` and `/install quickjs` workflows
-stay harmless.
+stay harmless. `durable` adds the experimental durable runtime
+(`DEEPAGENTS_CODE_DURABLE`).
 """
 
 KNOWN_EXTRAS: frozenset[str] = (

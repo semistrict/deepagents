@@ -6425,6 +6425,10 @@ class DeepAgentsApp(App):
         # grep would stay on the slow Python fallback until a restart.
         await self._ensure_managed_ripgrep()
 
+        from deepagents_code.client.launch.durable import (
+            durable_enabled,
+            start_durable_agent,
+        )
         from deepagents_code.client.launch.server_manager import (
             start_server_and_get_agent,
         )
@@ -6432,7 +6436,8 @@ class DeepAgentsApp(App):
         if self._server_kwargs is None:
             return
         self._server_kwargs["cwd"] = self._cwd
-        coros: list[Any] = [start_server_and_get_agent(**self._server_kwargs)]  # ty: ignore[invalid-argument-type]
+        start = start_durable_agent if durable_enabled() else start_server_and_get_agent
+        coros: list[Any] = [start(**self._server_kwargs)]  # ty: ignore[invalid-argument-type]
 
         if self._mcp_preload_kwargs is not None:
             from deepagents_code.main import _preload_session_mcp_server_info
@@ -31900,6 +31905,9 @@ async def run_textual_app(
 
         if app._server_proc is not None:
             app._server_proc.stop()
+        from deepagents_code.client.launch.durable import close_durable_threads
+
+        await close_durable_threads()
         # Surface any debug-preserved server-log paths now that Textual has torn
         # down the alternate screen; in-session teardown, `/restart`, and a
         # server whose startup failed only queued them (a stderr print then

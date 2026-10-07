@@ -262,6 +262,16 @@ setting it (see `config._PROJECT_DOTENV_DENIED_ENV_KEYS`); only the user's
 shell, launch env, or global `~/.deepagents/.env` can.
 """
 
+DURABLE = "DEEPAGENTS_CODE_DURABLE"
+"""Run the agent in the app's process on the experimental durable runtime.
+
+Off by default; parsed by `is_env_truthy`. Instead of starting a LangGraph
+server, the app builds the same agent with `deepagents_durable` running its
+loop and keeps threads in `durable.sqlite` beside `sessions.db`. Requires the
+`durable` extra. Server-only features (`/offload`, `/btw`, switching the
+working directory) are unavailable.
+"""
+
 FORKED_SUBAGENTS = "DEEPAGENTS_CODE_FORKED_SUBAGENTS"
 """Whether dcode's built-in `general-purpose` subagent runs in fork mode.
 

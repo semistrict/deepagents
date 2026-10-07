@@ -9,6 +9,7 @@ import sqlite3
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, NotRequired, TypedDict, cast
 
@@ -17,7 +18,7 @@ from deepagents_code._paths import harden_state_dir
 from deepagents_code.goal_state_notice import is_internal_message
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     import aiosqlite
     from langchain_core.runnables import RunnableConfig
@@ -27,6 +28,36 @@ if TYPE_CHECKING:
     from deepagents_code.output import OutputFormat
 
 logger = logging.getLogger(__name__)
+
+
+def _durable_variant[**P, R](
+    query: Callable[P, Awaitable[R]],
+) -> Callable[P, Awaitable[R]]:
+    """Answer a thread-discovery query from the durable index when agents use it.
+
+    Threads on the durable runtime are not in the checkpoint tables; the
+    same-named function in `durable_sessions` answers for them instead.
+
+    Returns:
+        `query`, deferring to its durable counterpart in durable mode.
+    """
+
+    @wraps(query)
+    async def dispatch(*args: P.args, **kwargs: P.kwargs) -> R:
+        from deepagents_code.client.launch.durable import durable_enabled
+
+        if durable_enabled():
+            from deepagents_code import durable_sessions
+
+            # `wraps` gave this function the query's name.
+            durable: Callable[P, Awaitable[R]] = getattr(
+                durable_sessions, dispatch.__name__
+            )
+            return await durable(*args, **kwargs)
+        return await query(*args, **kwargs)
+
+    return dispatch
+
 
 _aiosqlite_patched = False
 _jsonplus_serializer: JsonPlusSerializer | None = None
@@ -442,6 +473,7 @@ async def _ensure_threads_list_index(conn: aiosqlite.Connection) -> None:
         )
 
 
+@_durable_variant
 async def list_threads(
     agent_name: str | None = None,
     limit: int = DEFAULT_THREAD_LIMIT,
@@ -555,6 +587,7 @@ async def list_threads(
         return threads
 
 
+@_durable_variant
 async def populate_thread_checkpoint_details(
     threads: list[ThreadInfo],
     *,
@@ -617,6 +650,7 @@ async def _enrich_thread_checkpoint_details(
     return threads
 
 
+@_durable_variant
 async def prewarm_thread_message_counts(limit: int | None = None) -> None:
     """Prewarm thread selector cache for faster `/threads` open.
 
@@ -1443,6 +1477,7 @@ def _coerce_prompt_text(content: object) -> str | None:
     return str(content)
 
 
+@_durable_variant
 async def get_most_recent(
     agent_name: str | None = None,
     *,
@@ -1497,6 +1532,7 @@ async def get_most_recent(
             return row[0] if row else None
 
 
+@_durable_variant
 async def get_thread_updated_at(thread_id: str) -> str | None:
     """Get the latest stored update timestamp for a thread.
 
@@ -1548,6 +1584,7 @@ async def refresh_thread_activity(thread_id: str, updated_at: datetime) -> None:
         await conn.commit()
 
 
+@_durable_variant
 async def get_thread_agent(thread_id: str) -> str | None:
     """Get agent_name for a thread.
 
@@ -1569,6 +1606,7 @@ async def get_thread_agent(thread_id: str) -> str | None:
             return row[0] if row else None
 
 
+@_durable_variant
 async def get_thread_cwd(thread_id: str) -> str | None:
     """Get the most recently stored cwd for a thread.
 
@@ -1595,6 +1633,7 @@ async def get_thread_cwd(thread_id: str) -> str | None:
             return value if isinstance(value, str) and value else None
 
 
+@_durable_variant
 async def thread_exists(thread_id: str) -> bool:
     """Check if a thread exists in checkpoints.
 
@@ -1611,6 +1650,7 @@ async def thread_exists(thread_id: str) -> bool:
             return row is not None
 
 
+@_durable_variant
 async def find_similar_threads(thread_id: str, limit: int = 3) -> list[str]:
     """Find threads whose IDs start with the given prefix.
 
@@ -1638,6 +1678,7 @@ async def find_similar_threads(thread_id: str, limit: int = 3) -> list[str]:
             return [r[0] for r in rows]
 
 
+@_durable_variant
 async def delete_thread(thread_id: str) -> bool:
     """Delete thread checkpoints, side-question costs, and offloaded history.
 

@@ -312,6 +312,13 @@ class CompiledSubAgent(TypedDict):
 
 _SubAgentSpec = SubAgent | CompiledSubAgent
 
+AgentFactory = Callable[..., Runnable]
+"""Builds an agent from `create_agent`'s arguments.
+
+`langchain.agents.create_agent` by default. Another factory runs the same
+middleware on a different runtime.
+"""
+
 
 def _validate_subagent_mode(spec: _SubAgentSpec) -> None:
     """Reject unsupported context modes before a subagent can run."""
@@ -551,6 +558,7 @@ def create_sub_agent(
     *,
     state_schema: type | None = None,
     response_format: ResponseFormat[Any] | type | dict[str, Any] | None = None,
+    agent_factory: AgentFactory | None = None,
 ) -> Runnable:
     """Create a runnable agent from a raw `SubAgent` spec.
 
@@ -564,6 +572,12 @@ def create_sub_agent(
             the subagent.
         response_format: Optional response format override for this compiled
             subagent instance.
+        agent_factory: Builds the subagent from `create_agent`'s arguments.
+
+            !!! warning "Experimental"
+
+                Defaults to `langchain.agents.create_agent`; other factories may
+                change without notice.
 
     Returns:
         Runnable agent ready for task-tool invocation.
@@ -601,7 +615,7 @@ def create_sub_agent(
     if state_schema is not None:
         create_agent_kwargs["state_schema"] = state_schema
 
-    return create_agent(model, **create_agent_kwargs)
+    return (agent_factory or create_agent)(model, **create_agent_kwargs)
 
 
 def _get_subagent_response_format(
@@ -624,6 +638,7 @@ def _build_task_tool(  # noqa: C901, PLR0915
     *,
     private_state_keys: frozenset[str] = frozenset(),
     state_schema: type | None = None,
+    agent_factory: AgentFactory | None = None,
 ) -> BaseTool:
     """Create a task tool from subagent specs.
 
@@ -634,6 +649,7 @@ def _build_task_tool(  # noqa: C901, PLR0915
         private_state_keys: State keys marked with `PrivateStateAttr` that
             should be stripped from parent state before invoking subagents.
         state_schema: Base graph state schema forwarded to raw subagent specs.
+        agent_factory: Builds raw subagent specs; `create_agent` by default.
 
     Returns:
         A StructuredTool that can invoke subagents by type.
@@ -711,6 +727,7 @@ def _build_task_tool(  # noqa: C901, PLR0915
                 _resolved_declarative_spec(spec),
                 state_schema=state_schema,
                 response_format=response_format,
+                agent_factory=agent_factory,
             ),
         }
 
@@ -913,6 +930,12 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
 
             Leave unset to use `create_agent`'s default. `CompiledSubAgent`
             entries are unaffected — callers own those runnables' schemas.
+        agent_factory: Builds raw `SubAgent` specs from `create_agent`'s arguments.
+
+            !!! warning "Experimental"
+
+                Defaults to `langchain.agents.create_agent`; other factories may
+                change without notice.
 
     Example:
         ```python
@@ -952,6 +975,7 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         task_description: str | None = None,
         private_state_keys: frozenset[str] | None = None,
         state_schema: type | None = None,
+        agent_factory: AgentFactory | None = None,
     ) -> None:
         """Initialize the `SubAgentMiddleware`."""
         super().__init__()
@@ -964,6 +988,7 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         self._private_state_keys = private_state_keys or frozenset()
         self._task_description = task_description
         self._state_schema = state_schema
+        self._agent_factory = agent_factory
         if any(_is_forked_subagent(spec) or _is_forked_compiled_subagent(spec) for spec in subagents):
             warn_beta(name="forked subagents", obj_type="feature")
         self.subagent_names: frozenset[str] = frozenset(spec["name"] for spec in subagents)
@@ -975,6 +1000,7 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             task_description,
             private_state_keys=self._private_state_keys,
             state_schema=self._state_schema,
+            agent_factory=self._agent_factory,
         )
 
         # Build system prompt with available agents
@@ -1006,6 +1032,7 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             task_description=self._task_description,
             private_state_keys=value,
             state_schema=self._state_schema,
+            agent_factory=self._agent_factory,
         )
         self.tools = [task_tool]
 

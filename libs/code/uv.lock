@@ -1047,7 +1047,7 @@ provides-extras = ["aws", "quickjs", "video"]
 test = [
     { name = "av", specifier = ">=18.0.0,<19.0.0" },
     { name = "build" },
-    { name = "langchain-openai" },
+    { name = "langchain-openai", specifier = ">=1.6.5,<2.0.0" },
     { name = "langchain-tests", specifier = ">=1.1.9" },
     { name = "pillow", specifier = ">=12.3.0,<13.0.0" },
     { name = "pytest" },
@@ -1193,6 +1193,9 @@ daytona = [
 deepseek = [
     { name = "langchain-deepseek" },
 ]
+durable = [
+    { name = "deepagents-durable" },
+]
 fireworks = [
     { name = "langchain-fireworks" },
 ]
@@ -1260,6 +1263,7 @@ xai = [
 test = [
     { name = "blockbuster" },
     { name = "build" },
+    { name = "deepagents-durable" },
     { name = "hatchling" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1288,6 +1292,7 @@ requires-dist = [
     { name = "deepagents-acp", editable = "../acp" },
     { name = "deepagents-code", extras = ["agentcore", "daytona", "modal", "runloop", "vercel"], marker = "extra == 'all-sandboxes'" },
     { name = "deepagents-code", extras = ["anthropic", "baseten", "bedrock", "cohere", "deepseek", "fireworks", "google-genai", "groq", "huggingface", "ibm", "litellm", "meta", "mistralai", "nvidia", "ollama", "openai", "openrouter", "perplexity", "together", "vertex", "xai"], marker = "extra == 'all-providers'" },
+    { name = "deepagents-durable", marker = "extra == 'durable'", editable = "../durable" },
     { name = "fastmcp", specifier = ">=4.0.0b4,<5.0.0" },
     { name = "filelock", specifier = ">=3.29.7,<3.30" },
     { name = "genai-prices", specifier = ">=0.1.9,<0.2.0" },
@@ -1347,12 +1352,13 @@ requires-dist = [
     { name = "tomli-w", specifier = ">=1.2.0,<2.0.0" },
     { name = "uuid-utils", specifier = ">=0.17.0,<1.0.0" },
 ]
-provides-extras = ["anthropic", "baseten", "bedrock", "cohere", "deepseek", "fireworks", "google-genai", "groq", "huggingface", "ibm", "litellm", "meta", "mistralai", "nvidia", "ollama", "openai", "openrouter", "perplexity", "together", "vertex", "xai", "all-providers", "agentcore", "daytona", "modal", "runloop", "vercel", "all-sandboxes", "media", "quickjs"]
+provides-extras = ["anthropic", "baseten", "bedrock", "cohere", "deepseek", "fireworks", "google-genai", "groq", "huggingface", "ibm", "litellm", "meta", "mistralai", "nvidia", "ollama", "openai", "openrouter", "perplexity", "together", "vertex", "xai", "all-providers", "agentcore", "daytona", "modal", "runloop", "vercel", "all-sandboxes", "media", "quickjs", "durable"]
 
 [package.metadata.requires-dev]
 test = [
     { name = "blockbuster", specifier = ">=1.5.26,<1.6" },
     { name = "build", specifier = ">=1.5.0,<2.0.0" },
+    { name = "deepagents-durable", editable = "../durable" },
     { name = "hatchling", specifier = ">=1.31.0,<2.0.0" },
     { name = "pytest", specifier = ">=9.1.1,<10.0.0" },
     { name = "pytest-asyncio", specifier = ">=1.4.0,<2.0.0" },
@@ -1369,6 +1375,39 @@ test = [
     { name = "textual-dev", specifier = ">=1.8.0,<2.0.0" },
     { name = "twine", specifier = ">=6.2.0,<7.0.0" },
     { name = "ty", specifier = ">=0.0.61,<0.0.62" },
+]
+
+[[package]]
+name = "deepagents-durable"
+version = "0.0.1"
+source = { editable = "../durable" }
+dependencies = [
+    { name = "deepagents" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "deepagents", editable = "../deepagents" }]
+
+[package.metadata.requires-dev]
+bench = [{ name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.1" }]
+compat = [
+    { name = "av", specifier = ">=18.1.0" },
+    { name = "langchain-openai", specifier = ">=1.6.7" },
+    { name = "langchain-tests", specifier = ">=1.1.9" },
+    { name = "pillow", specifier = ">=12.3.0" },
+    { name = "pytest-benchmark", specifier = ">=5.3.0" },
+    { name = "pytest-codspeed", specifier = ">=5.0.3" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "pytest-socket", specifier = ">=0.8.1" },
+    { name = "pytest-timeout", specifier = ">=2.4.0" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
+]
+test = [
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-asyncio", specifier = ">=1.4.0" },
+    { name = "pytest-timeout", specifier = ">=2.4.0" },
+    { name = "ruff", specifier = ">=0.15.22,<0.16.0" },
+    { name = "ty", specifier = ">=0.0.62,<1.0.0" },
 ]
 
 [[package]]

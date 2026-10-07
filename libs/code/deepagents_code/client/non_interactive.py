@@ -2835,6 +2835,7 @@ async def run_non_interactive(
         )
         console.print(header)
 
+    from deepagents_code.client.launch.durable import durable_enabled, durable_session
     from deepagents_code.client.launch.server_manager import server_session
     from deepagents_code.hooks.client_lifecycle import ClientHookStopError
 
@@ -2918,10 +2919,17 @@ async def run_non_interactive(
             skill_name=skill_name,
         )
 
+        durable = durable_enabled()
+        session = durable_session if durable else server_session
         if not quiet:
-            console.print(Text("Starting LangGraph server...", style="dim"))
+            starting = (
+                "Starting agent on the durable runtime..."
+                if durable
+                else "Starting LangGraph server..."
+            )
+            console.print(Text(starting, style="dim"))
 
-        async with server_session(
+        async with session(
             assistant_id=assistant_id,
             model_name=model_name,
             model_params=model_params,
@@ -2967,7 +2975,8 @@ async def run_non_interactive(
                     logger.warning("MCP metadata preload failed", exc_info=True)
 
             if not quiet:
-                console.print(f"[green]{get_glyphs().checkmark} Server ready[/green]")
+                ready = "Agent ready" if durable else "Server ready"
+                console.print(f"[green]{get_glyphs().checkmark} {ready}[/green]")
 
             file_op_tracker = FileOpTracker(assistant_id=assistant_id, backend=None)
 
